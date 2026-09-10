@@ -360,7 +360,7 @@ class ClosingStoreController extends Controller
         $user = $request->user();
         $today = Carbon::now()->toDateString();
 
-        $query = FuelService::query()->with(['vehicle', 'supplier', 'createdBy']);
+        $query = FuelService::query()->with(['vehicle', 'supplier.bank', 'createdBy']);
 
         if ($user->hasRole('staff')) {
             // Staff: filter by their store from presence and only their own records
@@ -457,7 +457,7 @@ class ClosingStoreController extends Controller
     public function fuelServicesForPayment(Request $request)
     {
         $user = $request->user();
-        $query = FuelService::with(['vehicle', 'supplier', 'createdBy'])
+        $query = FuelService::with(['vehicle', 'supplier.bank', 'createdBy'])
             ->where('payment_type_id', 1) // Transfer
             ->where('status', 1) // Unpaid
             ->whereDoesntHave('paymentReceipts');

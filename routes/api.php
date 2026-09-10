@@ -347,6 +347,7 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/{id}', [\App\Http\Controllers\Api\SupplierController::class, 'show']);
         Route::post('/{id}', [\App\Http\Controllers\Api\SupplierController::class, 'update']);
         Route::post('/{id}/validate-qris', [\App\Http\Controllers\Api\SupplierController::class, 'validateQris']);
+        Route::post('/{id}/qris-dynamic', [\App\Http\Controllers\Api\SupplierController::class, 'qrisDynamic']);
         Route::delete('/{id}', [\App\Http\Controllers\Api\SupplierController::class, 'destroy']);
     });
 

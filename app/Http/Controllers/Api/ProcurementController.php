@@ -992,6 +992,7 @@ class ProcurementController extends Controller
             'invoicePurchases.detailInvoices.detailRequest.product.unit',
             'fuelServices.vehicle',
             'fuelServices.createdBy',
+            'fuelServices.supplier',
             'dailySalaries.createdBy',
             'supplier',
         ])->find($id);
@@ -1031,6 +1032,11 @@ class ProcurementController extends Controller
         }
 
         if (!$receipt->supplier || !$receipt->supplier->qris) {
+            Log::warning('paymentReceiptQris: supplier/qris kosong', [
+                'receipt_id' => $receipt->id,
+                'supplier_id' => $receipt->supplier_id,
+                'supplier_name' => $receipt->supplier?->name,
+            ]);
             return response()->json([
                 'success' => false,
                 'message' => 'Supplier tidak memiliki data QRIS.'
@@ -1094,9 +1100,14 @@ class ProcurementController extends Controller
         }
 
         if (!$invoice->supplier || !$invoice->supplier->qris) {
+            Log::warning('invoiceQris: supplier/qris kosong', [
+                'invoice_id' => $invoice->id,
+                'supplier_id' => $invoice->supplier_id,
+                'supplier_name' => $invoice->supplier?->name,
+            ]);
             return response()->json([
                 'success' => false,
-                'message' => 'Supplier tidak memiliki data QRIS.'
+                'message' => 'Supplier belum memiliki data QRIS — lengkapi field QRIS di form supplier.'
             ], 400);
         }
 
@@ -1362,7 +1373,7 @@ class ProcurementController extends Controller
         $fuelServiceIds = $request->fuel_service_ids;
 
         // Verify all fuel services are Transfer + pending (status=1).
-        $fuelServices = FuelService::whereIn('id', $fuelServiceIds)->get();
+        $fuelServices = FuelService::with('supplier')->whereIn('id', $fuelServiceIds)->get();
         foreach ($fuelServices as $fs) {
             if ($fs->status != '1') {
                 return response()->json([
@@ -1378,7 +1389,23 @@ class ProcurementController extends Controller
             }
         }
 
-        $receipt = DB::transaction(function () use ($request, $fuelServiceIds, $fuelServices) {
+        // Validate all selected items share the same non-null supplier.
+        $supplierIds = $fuelServices->pluck('supplier_id')->unique()->filter()->values();
+        if ($supplierIds->isEmpty()) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Tidak ada supplier yang terkait dengan item yang dipilih. Lengkapi data supplier pada item bensin/servis terlebih dahulu.'
+            ], 422);
+        }
+        if ($supplierIds->count() > 1) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Item yang dipilih berasal dari supplier berbeda. Pilih item dari supplier yang sama untuk satu pembayaran.'
+            ], 422);
+        }
+        $commonSupplierId = $supplierIds->first();
+
+        $receipt = DB::transaction(function () use ($request, $fuelServiceIds, $fuelServices, $commonSupplierId) {
             $totalAmount = $request->total_amount ?? $fuelServices->sum('amount');
 
             $imagePath = null;
@@ -1390,7 +1417,7 @@ class ProcurementController extends Controller
                 'payment_for' => '1', // FuelService
                 'total_amount' => (int) $totalAmount,
                 'transfer_amount' => (int) $request->transfer_amount,
-                'supplier_id' => null, // Fuel service tidak punya supplier
+                'supplier_id' => $commonSupplierId,
                 'user_id' => $request->user()->id,
                 'notes' => $request->notes,
                 'image' => $imagePath,
@@ -1439,7 +1466,7 @@ class ProcurementController extends Controller
         return response()->json([
             'success' => true,
             'message' => 'Payment receipt berhasil dibuat.',
-            'data' => $receipt->load('fuelServices')
+            'data' => $receipt->load('fuelServices.supplier')
         ], 201);
     }
 
@@ -1496,8 +1523,8 @@ class ProcurementController extends Controller
 
         $newFuelServiceIds = $request->fuel_service_ids;
 
-        // Load item-item baru (state target).
-        $newFuelServices = FuelService::whereIn('id', $newFuelServiceIds)->get();
+        // Load item-item baru (state target) dengan eager-load supplier.
+        $newFuelServices = FuelService::with('supplier')->whereIn('id', $newFuelServiceIds)->get();
         foreach ($newFuelServices as $fs) {
             // Pre-check: harus Transfer.
             if ($fs->payment_type_id != 1) {
@@ -1520,7 +1547,23 @@ class ProcurementController extends Controller
             }
         }
 
-        return DB::transaction(function () use ($request, $receipt, $newFuelServiceIds, $newFuelServices) {
+        // Validate all selected items share the same non-null supplier.
+        $supplierIds = $newFuelServices->pluck('supplier_id')->unique()->filter()->values();
+        if ($supplierIds->isEmpty()) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Tidak ada supplier yang terkait dengan item yang dipilih. Lengkapi data supplier pada item bensin/servis terlebih dahulu.'
+            ], 422);
+        }
+        if ($supplierIds->count() > 1) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Item yang dipilih berasal dari supplier berbeda. Pilih item dari supplier yang sama untuk satu pembayaran.'
+            ], 422);
+        }
+        $commonSupplierId = $supplierIds->first();
+
+        return DB::transaction(function () use ($request, $receipt, $newFuelServiceIds, $newFuelServices, $commonSupplierId) {
             $currentAttachedIds = $receipt->fuelServices()->pluck('fuel_services.id')->all();
 
             $toDetach = array_values(array_diff($currentAttachedIds, $newFuelServiceIds));
@@ -1542,6 +1585,7 @@ class ProcurementController extends Controller
             $receipt->update([
                 'transfer_amount' => (int) $request->transfer_amount,
                 'total_amount' => (int) $newFuelServices->sum('amount'),
+                'supplier_id' => $commonSupplierId,
                 'notes' => $request->notes,
                 'image' => $request->filled('image') ? $request->input('image') : $receipt->image,
             ]);
@@ -1549,7 +1593,7 @@ class ProcurementController extends Controller
             return response()->json([
                 'success' => true,
                 'message' => 'Payment receipt berhasil diperbarui.',
-                'data' => $receipt->load(['fuelServices.vehicle', 'fuelServices.createdBy'])
+                'data' => $receipt->load(['fuelServices.vehicle', 'fuelServices.createdBy', 'fuelServices.supplier'])
             ], 200);
         });
     }

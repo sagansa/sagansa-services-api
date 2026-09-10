@@ -401,9 +401,12 @@ class ProcurementNotificationTest extends TestCase
             'store_id' => $store->id,
             'status' => 1,
         ]);
+        // Receipt fuel service kini mewajibkan item punya supplier.
+        $fsSupplier = Supplier::factory()->create();
         $fuel = FuelService::create([
             'date' => now()->toDateString(),
             'vehicle_id' => $vehicle->id,
+            'supplier_id' => $fsSupplier->id,
             'payment_type_id' => 1,
             'fuel_service' => 1,
             'km' => 100,

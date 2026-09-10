@@ -5,6 +5,7 @@ namespace Tests\Feature\Api;
 use App\Models\InvoicePurchase;
 use App\Models\Supplier;
 use App\Models\Store;
+use App\Models\Vehicle;
 use Illuminate\Support\Facades\DB;
 use Laravel\Sanctum\Sanctum;
 use Spatie\Permission\Models\Role;
@@ -269,10 +270,18 @@ class SupplierVerificationAndClosingTest extends TestCase
         Sanctum::actingAs($this->userWithRole('admin'));
         $blacklisted = Supplier::factory()->create(['status' => 3]);
 
+        $store = Store::first() ?? Store::factory()->create();
+        $vehicle = Vehicle::create([
+            'no_register' => 'B' . rand(1000, 9999),
+            'type' => 1,
+            'store_id' => $store->id,
+            'status' => 1,
+        ]);
+
         $res = $this->postJson('/closing-stores/fuel-services', [
             'date' => now()->format('Y-m-d'),
             'fuel_service' => 1,
-            'vehicle_id' => 1,
+            'vehicle_id' => $vehicle->id,
             'supplier_id' => $blacklisted->id,
             'amount' => 100000,
             'image' => 'test.jpg',

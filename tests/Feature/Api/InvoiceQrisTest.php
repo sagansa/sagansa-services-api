@@ -34,6 +34,7 @@ class InvoiceQrisTest extends TestCase
     private function makeInvoice(Supplier $supplier, int $price = 150000): InvoicePurchase
     {
         $store = Store::first() ?? Store::factory()->create();
+        $creator = User::factory()->create();
 
         return InvoicePurchase::create([
             'store_id' => $store->id,
@@ -45,7 +46,7 @@ class InvoiceQrisTest extends TestCase
             'payment_status' => '1',
             'order_status' => '1',
             'payment_type_id' => 1,
-            'created_by_id' => 1,
+            'created_by_id' => $creator->id,
         ]);
     }
 

@@ -33,6 +33,7 @@ class PaymentReceiptInvoiceUpdateTest extends TestCase
     {
         $store = Store::first() ?? Store::factory()->create();
         $supplier = Supplier::first() ?? Supplier::factory()->create();
+        $creator = User::factory()->create();
 
         return InvoicePurchase::create([
             'store_id' => $store->id,
@@ -44,7 +45,7 @@ class PaymentReceiptInvoiceUpdateTest extends TestCase
             'payment_status' => $status,
             'order_status' => '1',
             'payment_type_id' => 1,
-            'created_by_id' => 1,
+            'created_by_id' => $creator->id,
         ]);
     }
 

@@ -12,6 +12,7 @@ use App\Models\PostalCode;
 use App\Models\Bank;
 use App\Services\QrisService;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Validator;
 
@@ -421,5 +422,78 @@ class SupplierController extends Controller
                 'currency' => $parsed['currency'],
             ],
         ]);
+    }
+
+    /**
+     * Generate dynamic QRIS payload for a supplier with a given amount.
+     * Used by bottom sheet before a receipt is created (e.g. fuel & service payment).
+     * Gating: non-staff only.
+     */
+    public function qrisDynamic(Request $request, $id)
+    {
+        $user = $request->user();
+        if ($user->hasRole('staff') || $user->hasRole('storage-staff')) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Anda tidak memiliki akses untuk generate QRIS.'
+            ], 403);
+        }
+
+        $supplier = Supplier::find($id);
+        if (!$supplier) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Supplier tidak ditemukan.'
+            ], 404);
+        }
+
+        if (!$supplier->qris) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Supplier belum memiliki data QRIS.'
+            ], 400);
+        }
+
+        $validator = Validator::make($request->all(), [
+            'amount' => 'required|numeric|min:1',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Validasi gagal.',
+                'errors' => $validator->errors()
+            ], 422);
+        }
+
+        try {
+            $qrisService = app(QrisService::class);
+            $dynamicPayload = $qrisService->generateDynamicPayload(
+                $supplier->qris,
+                (int) $request->amount
+            );
+
+            $parsed = $qrisService->parsePayload($supplier->qris);
+
+            return response()->json([
+                'success' => true,
+                'data' => [
+                    'payload' => $dynamicPayload,
+                    'merchant_name' => $parsed['merchant_name'] ?? null,
+                    'merchant_nmid' => $qrisService->getMerchantNmid($parsed),
+                    'amount' => (int) $request->amount,
+                    'raw_supplier_qris' => $supplier->qris,
+                ],
+            ]);
+        } catch (\Exception $e) {
+            Log::warning('qrisDynamic: gagal generate', [
+                'supplier_id' => $supplier->id,
+                'error' => $e->getMessage(),
+            ]);
+            return response()->json([
+                'success' => false,
+                'message' => 'Gagal generate QRIS: ' . $e->getMessage(),
+            ], 500);
+        }
     }
 }

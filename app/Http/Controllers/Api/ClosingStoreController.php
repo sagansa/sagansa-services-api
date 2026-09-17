@@ -86,14 +86,20 @@ class ClosingStoreController extends Controller
                   });
             });
 
-        $dailySalariesQuery = DailySalary::where('payment_type_id', 2) // Cash
+        $dailySalariesQuery = DailySalary::with('user')
+            ->where('payment_type_id', 2) // Cash
             ->where('store_id', $storeId)
-            ->whereDate('date', '>=', Carbon::now()->subDays(15)->toDateString())
             ->where(function ($q) use ($closingStore) {
-                $q->whereDoesntHave('closingStores')
-                  ->orWhereHas('closingStores', function ($q2) use ($closingStore) {
-                      $q2->where('closing_stores.id', $closingStore->id);
-                  });
+                $q->where(function ($q2) use ($closingStore) {
+                    // Belum terhubung closing mana pun: hanya yang sama
+                    // tanggal dengan closing ini (tanggal closing dibuat).
+                    $q2->whereDate('date', $closingStore->date)
+                       ->whereDoesntHave('closingStores');
+                })->orWhereHas('closingStores', function ($q2) use ($closingStore) {
+                    // Sudah terhubung ke closing ini: tetap tampil apa pun
+                    // tanggalnya agar item lama tak hilang saat diedit.
+                    $q2->where('closing_stores.id', $closingStore->id);
+                });
             });
 
         $invoicePurchasesQuery = InvoicePurchase::where('payment_type_id', 2) // Cash
@@ -233,11 +239,15 @@ class ClosingStoreController extends Controller
             ->where('store_id', $storeId)
             ->whereDate('date', '>=', Carbon::now()->subDays(10)->toDateString());
             
-        // Unpaid daily salaries for this store
-        $dailySalariesQuery = DailySalary::where('payment_type_id', 2) // Cash
+        // Unpaid daily salaries for this store — hanya yang sama tanggal
+        // dengan draft closing hari ini; gaji tunai tanggal lama tidak
+        // boleh ikut tutup shift hari ini (bandingkan dailySalaries
+        // select di ClosingStoreResource admin).
+        $dailySalariesQuery = DailySalary::with('user')
+            ->where('payment_type_id', 2) // Cash
             ->where('status', 1) // Unpaid
             ->where('store_id', $storeId)
-            ->whereDate('date', '>=', Carbon::now()->subDays(15)->toDateString());
+            ->whereDate('date', $today);
             
         // Unpaid invoice purchases for this store
         $invoicePurchasesQuery = InvoicePurchase::where('payment_type_id', 2) // Cash

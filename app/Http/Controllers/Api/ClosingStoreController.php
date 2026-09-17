@@ -76,14 +76,20 @@ class ClosingStoreController extends Controller
         $storeId = $closingStore->store_id;
 
         // Fetch unpaid/available transactions, including those already linked to this closing store
-        $fuelServicesQuery = FuelService::where('payment_type_id', 2) // Cash
+        $fuelServicesQuery = FuelService::with('vehicle')
+            ->where('payment_type_id', 2) // Cash
             ->where('store_id', $storeId)
-            ->whereDate('date', '>=', Carbon::now()->subDays(10)->toDateString())
             ->where(function ($q) use ($closingStore) {
-                $q->whereDoesntHave('closingStores')
-                  ->orWhereHas('closingStores', function ($q2) use ($closingStore) {
-                      $q2->where('closing_stores.id', $closingStore->id);
-                  });
+                $q->where(function ($q2) use ($closingStore) {
+                    // Belum terhubung closing mana pun: hanya yang sama
+                    // tanggal dengan closing ini (tanggal closing dibuat).
+                    $q2->whereDate('date', $closingStore->date)
+                       ->whereDoesntHave('closingStores');
+                })->orWhereHas('closingStores', function ($q2) use ($closingStore) {
+                    // Sudah terhubung ke closing ini: tetap tampil apa pun
+                    // tanggalnya agar item lama tak hilang saat diedit.
+                    $q2->where('closing_stores.id', $closingStore->id);
+                });
             });
 
         $dailySalariesQuery = DailySalary::with('user')
@@ -102,14 +108,20 @@ class ClosingStoreController extends Controller
                 });
             });
 
-        $invoicePurchasesQuery = InvoicePurchase::where('payment_type_id', 2) // Cash
+        $invoicePurchasesQuery = InvoicePurchase::with('supplier')
+            ->where('payment_type_id', 2) // Cash
             ->where('store_id', $storeId)
-            ->whereDate('date', '>=', Carbon::now()->subDays(15)->toDateString())
             ->where(function ($q) use ($closingStore) {
-                $q->whereDoesntHave('closingStores')
-                  ->orWhereHas('closingStores', function ($q2) use ($closingStore) {
-                      $q2->where('closing_stores.id', $closingStore->id);
-                  });
+                $q->where(function ($q2) use ($closingStore) {
+                    // Belum terhubung closing mana pun: hanya yang sama
+                    // tanggal dengan closing ini (tanggal closing dibuat).
+                    $q2->whereDate('date', $closingStore->date)
+                       ->whereDoesntHave('closingStores');
+                })->orWhereHas('closingStores', function ($q2) use ($closingStore) {
+                    // Sudah terhubung ke closing ini: tetap tampil apa pun
+                    // tanggalnya agar item lama tak hilang saat diedit.
+                    $q2->where('closing_stores.id', $closingStore->id);
+                });
             });
 
         if ($user->hasRole('staff')) {
@@ -233,11 +245,13 @@ class ClosingStoreController extends Controller
         
         $storeId = $presence->store_id;
         
-        // Unpaid fuel services for this store
-        $fuelServicesQuery = FuelService::where('payment_type_id', 2) // Cash
+        // Unpaid fuel services for this store — hanya yang sama tanggal
+        // dengan draft closing hari ini.
+        $fuelServicesQuery = FuelService::with('vehicle')
+            ->where('payment_type_id', 2) // Cash
             ->where('status', 1) // Unpaid
             ->where('store_id', $storeId)
-            ->whereDate('date', '>=', Carbon::now()->subDays(10)->toDateString());
+            ->whereDate('date', $today);
             
         // Unpaid daily salaries for this store — hanya yang sama tanggal
         // dengan draft closing hari ini; gaji tunai tanggal lama tidak
@@ -249,11 +263,13 @@ class ClosingStoreController extends Controller
             ->where('store_id', $storeId)
             ->whereDate('date', $today);
             
-        // Unpaid invoice purchases for this store
-        $invoicePurchasesQuery = InvoicePurchase::where('payment_type_id', 2) // Cash
+        // Unpaid invoice purchases for this store — hanya yang sama tanggal
+        // dengan draft closing hari ini.
+        $invoicePurchasesQuery = InvoicePurchase::with('supplier')
+            ->where('payment_type_id', 2) // Cash
             ->where('payment_status', '1') // Unpaid
             ->where('store_id', $storeId)
-            ->whereDate('date', '>=', Carbon::now()->subDays(15)->toDateString());
+            ->whereDate('date', $today);
             
         if ($request->user()->hasRole('staff')) {
             $fuelServicesQuery->where('created_by_id', $request->user()->id);

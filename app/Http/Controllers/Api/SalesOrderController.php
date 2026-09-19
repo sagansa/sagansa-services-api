@@ -524,6 +524,20 @@ class SalesOrderController extends Controller
             ], 404);
         }
 
+        // Idempoten: client bisa mengirim ulang (double-tap / list stale)
+        // setelah status berhasil diubah — balas sukses, bukan error.
+        if ((int) $order->delivery_status === 4) {
+            return response()->json([
+                'success' => true,
+                'message' => 'Order sudah siap dikirim.',
+                'data' => [
+                    'id' => $order->id,
+                    'receipt_no' => $order->receipt_no,
+                    'delivery_status' => 4,
+                ],
+            ]);
+        }
+
         if ((int) $order->delivery_status !== 1) {
             return response()->json([
                 'success' => false,

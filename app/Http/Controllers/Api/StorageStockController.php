@@ -50,6 +50,19 @@ class StorageStockController extends Controller
         $requests = $query->orderBy('date', 'desc')->orderBy('id', 'desc')
             ->paginate($perPage);
 
+        // Flag can_be_edited per laporan tanpa N+1: cari laporan terakhir
+        // untuk store-store di halaman ini dalam 2 query grouped.
+        $latestIds = $this->latestReportIdsForStores(
+            collect($requests->items())->pluck('store_id')->unique()->values()
+        );
+        $userCanEdit = $request->user()->hasRole('storage-staff')
+            || $request->user()->hasRole('admin');
+        foreach ($requests->items() as $report) {
+            $report->can_be_edited = $userCanEdit
+                && (int) $report->status !== 2
+                && (int) $latestIds->get((int) $report->store_id, 0) === (int) $report->id;
+        }
+
         return response()->json([
             'success' => true,
             'data' => $requests->items(),
@@ -70,7 +83,8 @@ class StorageStockController extends Controller
         $storageStock = RemainingStorage::with([
             'store',
             'user',
-            'detailStockCards.product.unit'
+            'detailStockCards.product.unit',
+            'updater',
         ])
             ->where('for', 'remaining_storage')
             ->find($id);
@@ -81,6 +95,14 @@ class StorageStockController extends Controller
                 'message' => 'Storage Stock tidak ditemukan.'
             ], 404);
         }
+
+        // Flag UX untuk tombol edit di mobile; guard sebenarnya tetap
+        // di update().
+        $userCanEdit = $request->user()->hasRole('storage-staff')
+            || $request->user()->hasRole('admin');
+        $storageStock->can_be_edited = $userCanEdit
+            && (int) $storageStock->status !== 2
+            && $this->isLatestForStore($storageStock);
 
         return response()->json([
             'success' => true,
@@ -165,6 +187,95 @@ class StorageStockController extends Controller
             return response()->json([
                 'success' => false,
                 'message' => 'Gagal menyimpan laporan stok sisa: ' . $e->getMessage(),
+            ], 500);
+        }
+    }
+
+    /**
+     * Update kuantitas laporan stok sisa (remaining_storage) — koreksi
+     * oleh storage-staff/admin. Hanya mengganti detail items; store_id,
+     * date, dan user_id pelapor awal tidak disentuh; editor dicatat di
+     * updated_by.
+     */
+    public function update(Request $request, $id)
+    {
+        if (!$request->user()->hasRole('storage-staff') && !$request->user()->hasRole('admin')) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Hanya storage-staff dan admin yang dapat mengedit laporan stok.'
+            ], 403);
+        }
+
+        $storageStock = RemainingStorage::where('for', 'remaining_storage')->find($id);
+
+        if (!$storageStock) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Storage Stock tidak ditemukan.'
+            ], 404);
+        }
+
+        if ((int) $storageStock->status === 2) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Laporan yang sudah valid tidak dapat diubah.'
+            ], 403);
+        }
+
+        if (!$this->isLatestForStore($storageStock)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Hanya laporan terakhir per gudang yang dapat diedit.'
+            ], 403);
+        }
+
+        $validator = Validator::make($request->all(), [
+            'items' => 'required|array|min:1',
+            'items.*.product_id' => 'required|exists:products,id',
+            'items.*.quantity' => 'required|numeric|min:0',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Validasi gagal.',
+                'errors' => $validator->errors()
+            ], 422);
+        }
+
+        DB::beginTransaction();
+        try {
+            $storageStock->update(['updated_by' => $request->user()->id]);
+
+            // Replace detail rows: delete existing + insert baru
+            // (pola StoreConsumptionController::update).
+            $storageStock->detailStockCards()->delete();
+            foreach ($request->items as $item) {
+                DetailStockCard::create([
+                    'stock_card_id' => $storageStock->id,
+                    'product_id' => $item['product_id'],
+                    'quantity' => $item['quantity'],
+                ]);
+            }
+
+            DB::commit();
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Laporan Stok Sisa berhasil diperbarui.',
+                'data' => $storageStock->load([
+                    'store',
+                    'user',
+                    'detailStockCards.product.unit',
+                    'updater',
+                ])
+            ]);
+        } catch (\Exception $e) {
+            DB::rollBack();
+
+            return response()->json([
+                'success' => false,
+                'message' => 'Gagal memperbarui laporan stok sisa: ' . $e->getMessage(),
             ], 500);
         }
     }
@@ -296,5 +407,67 @@ class StorageStockController extends Controller
             'success' => true,
             'data' => $stockMonitorings
         ]);
+    }
+
+    /**
+     * Apakah laporan ini masih yang terakhir (date desc, id desc) untuk
+     * store yang sama di antara laporan remaining_storage. Tie-break id
+     * diperlukan karena admin bisa membuat laporan backdated via panel.
+     */
+    private function isLatestForStore(RemainingStorage $report): bool
+    {
+        return !RemainingStorage::where('for', 'remaining_storage')
+            ->where('store_id', $report->store_id)
+            ->where(function ($q) use ($report) {
+                $q->where('date', '>', $report->date)
+                    ->orWhere(function ($q2) use ($report) {
+                        $q2->where('date', $report->date)
+                            ->where('id', '>', $report->id);
+                    });
+            })
+            ->exists();
+    }
+
+    /**
+     * Map store_id => id laporan remaining_storage terakhir, hanya untuk
+     * store pada $storeIds. Dua query grouped (hindari N+1 di index).
+     */
+    private function latestReportIdsForStores($storeIds)
+    {
+        if ($storeIds->isEmpty()) {
+            return collect();
+        }
+
+        $maxDates = DB::table('stock_cards')
+            ->where('for', 'remaining_storage')
+            ->whereIn('store_id', $storeIds)
+            ->groupBy('store_id')
+            ->select('store_id', DB::raw('MAX(date) as max_date'))
+            ->get();
+
+        if ($maxDates->isEmpty()) {
+            return collect();
+        }
+
+        $rows = DB::table('stock_cards')
+            ->where('for', 'remaining_storage')
+            ->whereIn('store_id', $maxDates->pluck('store_id'))
+            ->whereIn('date', $maxDates->pluck('max_date'))
+            ->groupBy('store_id', 'date')
+            ->select('store_id', 'date', DB::raw('MAX(id) as max_id'))
+            ->get();
+
+        // Ambil id pada tanggal maksimum tiap store.
+        $latestByStore = collect();
+        foreach ($maxDates as $d) {
+            $match = $rows->first(function ($r) use ($d) {
+                return (int) $r->store_id === (int) $d->store_id
+                    && (string) $r->date === (string) $d->max_date;
+            });
+            if ($match) {
+                $latestByStore->put((int) $d->store_id, (int) $match->max_id);
+            }
+        }
+        return $latestByStore;
     }
 }

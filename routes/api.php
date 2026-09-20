@@ -222,6 +222,7 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/', [\App\Http\Controllers\Api\StorageStockController::class, 'index']);
         Route::post('/', [\App\Http\Controllers\Api\StorageStockController::class, 'store']);
         Route::get('/{id}', [\App\Http\Controllers\Api\StorageStockController::class, 'show']);
+        Route::put('/{id}', [\App\Http\Controllers\Api\StorageStockController::class, 'update']);
     });
 
     // Store Consumption (konsumsi bahan toko) — stock_cards for=store_consumption.

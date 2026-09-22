@@ -29,10 +29,13 @@ class SalesOrderController extends Controller
         $for = $request->query('for', '3');
 
         if ($receiptNo) {
+            // Resi bisa duplikat (sync marketplace lama selalu INSERT);
+            // pilih baris termuda agar konsisten dgn fallback updateDelivery.
             $order = $this->orderRowQuery()
                 ->where('sales_orders.receipt_no', $receiptNo)
                 ->where('sales_orders.for', $for)
                 ->whereNull('sales_orders.deleted_at')
+                ->orderByDesc('sales_orders.id')
                 ->first();
 
             if (!$order) {
@@ -337,8 +340,8 @@ class SalesOrderController extends Controller
     public function updateDelivery(Request $request)
     {
         $validator = Validator::make($request->all(), [
-            // receipt_no wajib untuk online order (for=3), order_id wajib untuk
-            // direct order (for=1). Salah satu harus diisi.
+            // order_id utama untuk semua tipe (direct for=1, online for=3);
+            // receipt_no fallback untuk app versi lama. Salah satu harus diisi.
             'receipt_no' => 'nullable|string',
             'order_id' => 'nullable|integer',
             // image_delivery: bisa string tunggal (legacy) ATAU array path
@@ -357,7 +360,12 @@ class SalesOrderController extends Controller
             ], 400);
         }
 
-        // Lookup order: direct (for=1) by order_id, online (for=3) by receipt_no.
+        // Lookup order: utamakan order_id (mobile mengirim id baris yang
+        // persis dilihat user — direct for=1 maupun online for=3). Fallback
+        // receipt_no hanya untuk app versi lama. Resi bisa duplikat di DB
+        // (sync marketplace-bot dulu selalu INSERT), maka fallback wajib
+        // deterministik: pilih baris termuda (id terbesar) — baris teratas
+        // di list mobile — agar update tidak mendarat di duplikat acak.
         $order = null;
         $receiptNo = $request->input('receipt_no');
         $orderId = $request->input('order_id');
@@ -365,7 +373,7 @@ class SalesOrderController extends Controller
         if ($orderId) {
             $order = DB::table('sales_orders')
                 ->where('id', $orderId)
-                ->where('for', 1)
+                ->whereIn('for', [1, 3])
                 ->whereNull('deleted_at')
                 ->first();
         } elseif ($receiptNo) {
@@ -373,6 +381,7 @@ class SalesOrderController extends Controller
                 ->where('receipt_no', $receiptNo)
                 ->where('for', 3)
                 ->whereNull('deleted_at')
+                ->orderByDesc('id')
                 ->first();
         }
 

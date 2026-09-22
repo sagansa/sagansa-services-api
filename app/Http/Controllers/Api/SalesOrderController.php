@@ -451,6 +451,9 @@ class SalesOrderController extends Controller
                     fn ($p) => $this->getStorageUrl($p),
                     $newImagePaths
                 ),
+                'image_delivery_url' => !empty($newImagePaths)
+                    ? $this->getStorageUrl($newImagePaths[0])
+                    : null,
             ]
         ]);
     }

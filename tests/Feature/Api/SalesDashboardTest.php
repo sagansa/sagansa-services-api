@@ -420,4 +420,26 @@ class SalesDashboardTest extends TestCase
 
         $res->assertStatus(422);
     }
+
+    public function test_categories_view_returns_online_category_breakdown(): void
+    {
+        $admin = $this->adminOrSkip();
+
+        Sanctum::actingAs($admin);
+        $res = $this->getJson('/sales-dashboard?periode=today&view=categories');
+
+        $res->assertOk()
+            ->assertJsonPath('data.view', 'categories')
+            ->assertJsonStructure([
+                'success',
+                'data' => [
+                    'view',
+                    'periode',
+                    'total_omzet',
+                    'total_qty',
+                    'prev_label',
+                    'items',
+                ],
+            ]);
+    }
 }

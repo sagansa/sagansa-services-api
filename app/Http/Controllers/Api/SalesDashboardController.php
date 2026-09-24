@@ -21,7 +21,7 @@ class SalesDashboardController extends Controller
 
         $validated = $request->validate([
             'periode' => ['nullable', 'in:today,yesterday,month,year'],
-            'view'    => ['nullable', 'in:summary,trend,products,channels'],
+            'view'    => ['nullable', 'in:summary,trend,products,channels,categories'],
             'page'    => ['nullable', 'integer', 'min:1'],
             'per_page'=> ['nullable', 'integer', 'min:1', 'max:200'],
             'sort'    => ['nullable', 'in:qty,revenue'],
@@ -75,6 +75,13 @@ class SalesDashboardController extends Controller
                 'data'    => array_merge(
                     ['view' => 'channels', 'periode' => $periode],
                     $this->channelsView($range),
+                ),
+            ]),
+            'categories' => response()->json([
+                'success' => true,
+                'data'    => array_merge(
+                    ['view' => 'categories', 'periode' => $periode],
+                    $this->categoriesView($range, $periode, $compareYear),
                 ),
             ]),
         };
@@ -519,6 +526,98 @@ class SalesDashboardController extends Controller
 
         return [
             'total_omzet' => $totalOmzet,
+            'items'       => $items,
+        ];
+    }
+
+    private function categoriesView(array $range, string $periode = 'today', ?int $compareYear = null): array
+    {
+        // Tentukan rentang pembanding (YoY untuk year / natural untuk periode lainnya).
+        if ($compareYear !== null && $periode === 'year') {
+            [$prevRange] = $this->resolvePrevRangeAndBuckets($range, $periode, $compareYear);
+            $prevLabel = (string) $compareYear;
+        } else {
+            [$prevRange, $prevLabel] = $this->resolvePrevRangeNatural($range['from'], $range['to']);
+        }
+
+        // Query data periode saat ini per online_category
+        $currentRows = $this->deliveredSalesOrders($range)
+            ->join('detail_sales_orders as dso', 'dso.sales_order_id', '=', 'so.id')
+            ->join('products as p', 'p.id', '=', 'dso.product_id')
+            ->leftJoin('online_categories as oc', 'oc.id', '=', 'p.online_category_id')
+            ->select(
+                DB::raw('COALESCE(oc.id, 0) as category_id'),
+                DB::raw('COALESCE(oc.name, "Tanpa Kategori") as category_name'),
+                DB::raw('COUNT(DISTINCT so.id) as order_count'),
+                DB::raw('SUM(dso.quantity) as qty'),
+                DB::raw('SUM(dso.subtotal_price) as omzet')
+            )
+            ->groupBy('category_id', 'category_name')
+            ->orderBy('omzet', 'desc')
+            ->get();
+
+        $totalOmzet = (int) $currentRows->sum('omzet');
+        $totalQty = (int) $currentRows->sum('qty');
+
+        // Query data periode pembanding
+        $prevRows = $this->deliveredSalesOrders($prevRange)
+            ->join('detail_sales_orders as dso', 'dso.sales_order_id', '=', 'so.id')
+            ->join('products as p', 'p.id', '=', 'dso.product_id')
+            ->leftJoin('online_categories as oc', 'oc.id', '=', 'p.online_category_id')
+            ->select(
+                DB::raw('COALESCE(oc.id, 0) as category_id'),
+                DB::raw('SUM(dso.quantity) as qty'),
+                DB::raw('SUM(dso.subtotal_price) as omzet')
+            )
+            ->groupBy('category_id')
+            ->get()
+            ->keyBy('category_id');
+
+        // Top 3 produk per kategori untuk drilldown ringkas
+        $topProductsPerCategory = $this->deliveredSalesOrders($range)
+            ->join('detail_sales_orders as dso', 'dso.sales_order_id', '=', 'so.id')
+            ->join('products as p', 'p.id', '=', 'dso.product_id')
+            ->select(
+                DB::raw('COALESCE(p.online_category_id, 0) as category_id'),
+                'p.name as product_name',
+                DB::raw('SUM(dso.quantity) as qty'),
+                DB::raw('SUM(dso.subtotal_price) as omzet')
+            )
+            ->groupBy('category_id', 'p.name')
+            ->orderBy('omzet', 'desc')
+            ->get()
+            ->groupBy('category_id');
+
+        $items = $currentRows->map(function ($row) use ($prevRows, $totalOmzet, $topProductsPerCategory) {
+            $catId = (int) $row->category_id;
+            $prev = $prevRows->get($catId);
+            $topProds = ($topProductsPerCategory->get($catId) ?? collect())
+                ->take(3)
+                ->map(fn($tp) => [
+                    'name'  => (string) $tp->product_name,
+                    'qty'   => (int) $tp->qty,
+                    'omzet' => (int) $tp->omzet,
+                ])
+                ->values();
+
+            $omzet = (int) $row->omzet;
+            return [
+                'category_id'   => $catId,
+                'category_name' => (string) $row->category_name,
+                'omzet'         => $omzet,
+                'qty'           => (int) $row->qty,
+                'order_count'   => (int) $row->order_count,
+                'percentage'    => $totalOmzet > 0 ? round(($omzet / $totalOmzet) * 100, 1) : 0.0,
+                'omzet_prev'    => (int) ($prev?->omzet ?? 0),
+                'qty_prev'      => (int) ($prev?->qty ?? 0),
+                'top_products'  => $topProds,
+            ];
+        })->values();
+
+        return [
+            'total_omzet' => $totalOmzet,
+            'total_qty'   => $totalQty,
+            'prev_label'  => $prevLabel,
             'items'       => $items,
         ];
     }

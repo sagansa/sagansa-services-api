@@ -20,7 +20,7 @@ class SalesDashboardController extends Controller
         }
 
         $validated = $request->validate([
-            'periode' => ['nullable', 'in:today,yesterday,month,year'],
+            'periode' => ['nullable', 'in:today,yesterday,month,last_month,year,last_year'],
             'view'    => ['nullable', 'in:summary,trend,products,channels,categories'],
             'page'    => ['nullable', 'integer', 'min:1'],
             'per_page'=> ['nullable', 'integer', 'min:1', 'max:200'],
@@ -53,7 +53,7 @@ class SalesDashboardController extends Controller
                 'success' => true,
                 'data'    => array_merge(
                     ['view' => 'summary', 'periode' => $periode],
-                    $this->summaryView($range),
+                    $this->summaryView($range, $periode),
                 ),
             ]),
             'trend'    => response()->json([
@@ -74,7 +74,7 @@ class SalesDashboardController extends Controller
                 'success' => true,
                 'data'    => array_merge(
                     ['view' => 'channels', 'periode' => $periode],
-                    $this->channelsView($range),
+                    $this->channelsView($range, $periode, $compareYear),
                 ),
             ]),
             'categories' => response()->json([
@@ -106,27 +106,48 @@ class SalesDashboardController extends Controller
                 'to'    => $now->copy()->endOfDay()->toDateTimeString(),
                 'label' => $now->format('M Y') . ' (s/d hari ini)',
             ],
+            'last_month'=> [
+                'from'  => $now->copy()->subMonth()->startOfMonth()->startOfDay()->toDateTimeString(),
+                'to'    => $now->copy()->subMonth()->endOfMonth()->endOfDay()->toDateTimeString(),
+                'label' => $now->copy()->subMonth()->format('M Y'),
+            ],
             'year'      => [
                 'from'  => $now->copy()->startOfYear()->startOfDay()->toDateTimeString(),
                 'to'    => $now->copy()->endOfDay()->toDateTimeString(),
                 'label' => $now->format('Y') . ' (s/d hari ini)',
             ],
+            'last_year' => [
+                'from'  => $now->copy()->subYear()->startOfYear()->startOfDay()->toDateTimeString(),
+                'to'    => $now->copy()->subYear()->endOfYear()->endOfDay()->toDateTimeString(),
+                'label' => $now->copy()->subYear()->format('Y'),
+            ],
         };
     }
 
     /**
-     * Base query: delivered sales orders (delivery_status=3, not soft-deleted)
-     * within the given date range. Use as starting point for all view queries.
+     * Base query: sales orders yang valid/selesai (Online & Direct terkirim, Employee tervalidasi).
+     * Meliputi seluruh channel penjualan:
+     * - Online (for = 3): delivery_status = 3 (terkirim)
+     * - Direct (for = 1): delivery_status = 3 (terkirim)
+     * - Employee (for = 2): delivery_status in (1, 2) (penjualan langsung oleh sales employee)
      */
     private function deliveredSalesOrders(array $range): \Illuminate\Database\Query\Builder
     {
         return DB::table('sales_orders as so')
             ->whereNull('so.deleted_at')
-            ->where('so.delivery_status', 3) // 3 = terkirim
+            ->where(function ($query) {
+                $query->where(function ($q) {
+                    $q->whereIn('so.for', [1, 3])
+                      ->where('so.delivery_status', 3);
+                })->orWhere(function ($q) {
+                    $q->where('so.for', 2)
+                      ->whereIn('so.delivery_status', [1, 2]);
+                });
+            })
             ->whereBetween('so.created_at', [$range['from'], $range['to']]);
     }
 
-    private function summaryView(array $range): array
+    private function summaryView(array $range, string $periode = 'today'): array
     {
         $omzet   = $this->deliveredSalesOrders($range)->sum('so.total_price');
         $orders  = $this->deliveredSalesOrders($range)->count('so.id');
@@ -135,7 +156,7 @@ class SalesDashboardController extends Controller
             ->sum('dso.quantity');
 
         // Pembanding periode natural (today↔kemarin, month↔bulan lalu paralel, dst).
-        [$prevRange, $prevLabel] = $this->resolvePrevRangeNatural($range['from'], $range['to']);
+        [$prevRange, $prevLabel] = $this->resolvePrevRangeNatural($range['from'], $range['to'], $periode);
         $prevOmzet  = $this->deliveredSalesOrders($prevRange)->sum('so.total_price');
         $prevOrders = $this->deliveredSalesOrders($prevRange)->count('so.id');
         $prevQty    = $this->deliveredSalesOrders($prevRange)
@@ -155,64 +176,45 @@ class SalesDashboardController extends Controller
     }
 
     /**
-     * Hitung range & label pembanding KPI berdasarkan durasi range asli.
-     * Deteksi via selisih hari & posisi `from` (bukan string periode):
-     * - 1 hari & from == hari ini → kemarin (full day)
-     * - 1 hari & from == kemarin → H-2 (full day)
-     * - bulan berjalan (from awal bulan s/d hari ini) → bulan lalu tgl 1..N paralel
-     * - tahun berjalan (from awal tahun s/d hari ini) → tahun lalu 1 Jan..tgl/bulan sama
-     *
-     * Apple-to-apple untuk month/year: prev hanya s/d hari/bulan yang sama
-     * (mis. 18 Jul tahun ini vs 18 Jul tahun lalu) — bukan full month/year lalu.
+     * Hitung range & label pembanding KPI berdasarkan periode atau durasi range asli.
+     * - today: kemarin (full day)
+     * - yesterday: H-2 (full day)
+     * - month: bulan lalu tgl 1..N paralel
+     * - last_month: 2 bulan lalu (bulan penuh)
+     * - year: tahun lalu 1 Jan..tgl/bulan sama paralel
+     * - last_year: 2 tahun lalu (tahun penuh)
      */
-    private function resolvePrevRangeNatural(string $fromStr, string $toStr): array
+    private function resolvePrevRangeNatural(string $fromStr, string $toStr, string $periode = ''): array
     {
-        $from = Carbon::parse($fromStr, 'Asia/Jakarta');
-        $to   = Carbon::parse($toStr, 'Asia/Jakarta');
-        $now  = Carbon::now('Asia/Jakarta');
+        $now = Carbon::now('Asia/Jakarta');
 
-        $dayDiff = $from->copy()->startOfDay()->diffInDays($to->copy()->startOfDay());
-
-        // Kasus 1 & 2: range 1 hari → kemarin / H-2.
-        if ($dayDiff === 0) {
-            $isToday = $from->isSameDay($now);
-            $prevDate = $isToday ? $now->copy()->subDay() : $from->copy()->subDay();
+        if ($periode === 'today') {
+            $prevDate = $now->copy()->subDay();
             return [
                 [
                     'from'  => $prevDate->copy()->startOfDay()->toDateTimeString(),
                     'to'    => $prevDate->copy()->endOfDay()->toDateTimeString(),
                     'label' => $prevDate->format('d M Y'),
                 ],
-                $isToday ? 'Kemarin' : $prevDate->format('d M Y'),
+                'Kemarin',
             ];
         }
 
-        // Kasus 4: tahun berjalan → tahun lalu paralel (1 Jan s/d tgl/bulan sama).
-        // Dicek SEBELUM kasus bulan: 1 Jan juga awal bulan, sehingga tanpa
-        // pembeda rentang, range "tahun berjalan" selalu tertangkap cabang
-        // bulan dan pembanding KPI salah menunjuk bulan lalu. Pembeda: range
-        // tahun lintas bulan (1 Jan s/d hari ini tidak mungkin satu bulan).
-        $isYearRange = $from->isSameDay($from->copy()->startOfYear()->startOfDay())
-            && $to->isSameDay($now)
-            && !$from->isSameMonth($to);
-        if ($isYearRange) {
-            $prevYear = $to->copy()->subYear();
+        if ($periode === 'yesterday') {
+            $prevDate = $now->copy()->subDays(2);
             return [
                 [
-                    'from'  => $prevYear->copy()->startOfYear()->startOfDay()->toDateTimeString(),
-                    'to'    => $prevYear->copy()->endOfDay()->toDateTimeString(),
-                    'label' => $prevYear->format('Y'),
+                    'from'  => $prevDate->copy()->startOfDay()->toDateTimeString(),
+                    'to'    => $prevDate->copy()->endOfDay()->toDateTimeString(),
+                    'label' => $prevDate->format('d M Y'),
                 ],
-                $prevYear->format('Y') . ' (s/d ' . $prevYear->format('d M') . ')',
+                $prevDate->format('d M Y'),
             ];
         }
 
-        // Kasus 3: bulan berjalan → bulan lalu paralel (tgl 1..N bulan lalu).
-        $isMonthRange = $from->isSameDay($from->copy()->startOfMonth()->startOfDay())
-            && $to->isSameDay($now);
-        if ($isMonthRange) {
-            $toDay = (int) $to->format('d');
-            $prevMonth = $to->copy()->subMonth();
+        if ($periode === 'month') {
+            $toDay = (int) $now->format('d');
+            $prevMonth = $now->copy()->subMonth();
             $lastDayPrev = (int) $prevMonth->copy()->endOfMonth()->format('d');
             $effectiveDay = min($toDay, $lastDayPrev); // clamp utk Februari dll.
             return [
@@ -225,7 +227,45 @@ class SalesDashboardController extends Controller
             ];
         }
 
-        // Fallback: shift mundur sesuai durasi (jarang terpakai, jaga-jaga).
+        if ($periode === 'last_month') {
+            $prevMonth = $now->copy()->subMonths(2);
+            return [
+                [
+                    'from'  => $prevMonth->copy()->startOfMonth()->startOfDay()->toDateTimeString(),
+                    'to'    => $prevMonth->copy()->endOfMonth()->endOfDay()->toDateTimeString(),
+                    'label' => $prevMonth->format('M Y'),
+                ],
+                $prevMonth->format('M Y'),
+            ];
+        }
+
+        if ($periode === 'year') {
+            $prevYear = $now->copy()->subYear();
+            return [
+                [
+                    'from'  => $prevYear->copy()->startOfYear()->startOfDay()->toDateTimeString(),
+                    'to'    => $prevYear->copy()->endOfDay()->toDateTimeString(),
+                    'label' => $prevYear->format('Y'),
+                ],
+                $prevYear->format('Y') . ' (s/d ' . $prevYear->format('d M') . ')',
+            ];
+        }
+
+        if ($periode === 'last_year') {
+            $prevYear = $now->copy()->subYears(2);
+            return [
+                [
+                    'from'  => $prevYear->copy()->startOfYear()->startOfDay()->toDateTimeString(),
+                    'to'    => $prevYear->copy()->endOfYear()->endOfDay()->toDateTimeString(),
+                    'label' => $prevYear->format('Y'),
+                ],
+                $prevYear->format('Y'),
+            ];
+        }
+
+        // Fallback jika periode tidak terdefinisi
+        $from = Carbon::parse($fromStr, 'Asia/Jakarta');
+        $to   = Carbon::parse($toStr, 'Asia/Jakarta');
         $prevFrom = $from->copy()->subSeconds($from->diffInSeconds($to) + 1)->startOfDay();
         $prevTo = $from->copy()->subSecond()->endOfDay();
         return [
@@ -323,11 +363,25 @@ class SalesDashboardController extends Controller
                     $now->format('Y-m-') . str_pad($d, 2, '0', STR_PAD_LEFT)
                 )->all(),
             ],
+            'last_month' => [
+                "DATE(so.created_at)",
+                'day',
+                collect(range(1, (int) $now->copy()->subMonth()->endOfMonth()->format('d')))->map(fn($d) =>
+                    $now->copy()->subMonth()->format('Y-m-') . str_pad($d, 2, '0', STR_PAD_LEFT)
+                )->all(),
+            ],
             'year' => [
                 "DATE_FORMAT(so.created_at, '%Y-%m')",
                 'month',
                 array_map(fn($m) =>
                     $now->format('Y-') . str_pad($m, 2, '0', STR_PAD_LEFT), range(1, 12)
+                ),
+            ],
+            'last_year' => [
+                "DATE_FORMAT(so.created_at, '%Y-%m')",
+                'month',
+                array_map(fn($m) =>
+                    $now->copy()->subYear()->format('Y-') . str_pad($m, 2, '0', STR_PAD_LEFT), range(1, 12)
                 ),
             ],
         };
@@ -365,11 +419,13 @@ class SalesDashboardController extends Controller
                 $prevBuckets = array_map(fn($h) => sprintf('%02d:00', $h), range(0, 23));
                 break;
             case 'month':
+            case 'last_month':
                 $prevBuckets = collect(range(1, $toDay))
                     ->map(fn($d) => sprintf('%04d-%02d-%02d', $compareYear, $toOriginal->month, $d))
                     ->all();
                 break;
             case 'year':
+            case 'last_year':
                 $prevBuckets = array_map(
                     fn($m) => sprintf('%04d-%02d', $compareYear, $m),
                     range(1, 12)
@@ -404,12 +460,12 @@ class SalesDashboardController extends Controller
         $offset = ($page - 1) * $perPage;
         $rows = (clone $baseQuery)->skip($offset)->take($perPage)->get();
 
-        // Tentukan rentang pembanding (YoY untuk year / natural untuk periode lainnya).
-        if ($compareYear !== null && $periode === 'year') {
+        // Tentukan rentang pembanding (YoY untuk year/last_year / natural untuk periode lainnya).
+        if ($compareYear !== null && ($periode === 'year' || $periode === 'last_year')) {
             [$prevRange] = $this->resolvePrevRangeAndBuckets($range, $periode, $compareYear);
             $prevLabel = (string) $compareYear;
         } else {
-            [$prevRange, $prevLabel] = $this->resolvePrevRangeNatural($range['from'], $range['to']);
+            [$prevRange, $prevLabel] = $this->resolvePrevRangeNatural($range['from'], $range['to'], $periode);
         }
 
         $items = $rows;
@@ -487,17 +543,40 @@ class SalesDashboardController extends Controller
         ];
     }
 
-    private function channelsView(array $range): array
+    private function channelsView(array $range, string $periode = 'today', ?int $compareYear = null): array
     {
-        // Omzet + order_count per channel — NO detail join (avoid fan-out).
+        // Tentukan rentang pembanding (YoY untuk year/last_year / natural untuk periode lainnya).
+        if ($compareYear !== null && ($periode === 'year' || $periode === 'last_year')) {
+            [$prevRange] = $this->resolvePrevRangeAndBuckets($range, $periode, $compareYear);
+            $prevLabel = (string) $compareYear;
+        } else {
+            [$prevRange, $prevLabel] = $this->resolvePrevRangeNatural($range['from'], $range['to'], $periode);
+        }
+
+        // Current period: Omzet + order_count per channel
         $omzetRows = $this->deliveredSalesOrders($range)
             ->select('so.for', DB::raw('COUNT(*) as order_count'), DB::raw('SUM(so.total_price) as omzet'))
             ->groupBy('so.for')
             ->get()
             ->keyBy('for');
 
-        // Qty per channel — detail join is safe here.
+        // Current period: Qty per channel
         $qtyRows = $this->deliveredSalesOrders($range)
+            ->join('detail_sales_orders as dso', 'dso.sales_order_id', '=', 'so.id')
+            ->select('so.for', DB::raw('SUM(dso.quantity) as qty'))
+            ->groupBy('so.for')
+            ->get()
+            ->keyBy('for');
+
+        // Prev period: Omzet + order_count per channel
+        $prevOmzetRows = $this->deliveredSalesOrders($prevRange)
+            ->select('so.for', DB::raw('COUNT(*) as order_count'), DB::raw('SUM(so.total_price) as omzet'))
+            ->groupBy('so.for')
+            ->get()
+            ->keyBy('for');
+
+        // Prev period: Qty per channel
+        $prevQtyRows = $this->deliveredSalesOrders($prevRange)
             ->join('detail_sales_orders as dso', 'dso.sales_order_id', '=', 'so.id')
             ->select('so.for', DB::raw('SUM(dso.quantity) as qty'))
             ->groupBy('so.for')
@@ -506,38 +585,61 @@ class SalesDashboardController extends Controller
 
         $labels = ['1' => 'Direct', '2' => 'Employee', '3' => 'Online'];
         $totalOmzet = (int) $omzetRows->sum(fn($r) => (int) $r->omzet);
+        $totalOmzetPrev = (int) $prevOmzetRows->sum(fn($r) => (int) $r->omzet);
+        $totalQty = (int) $qtyRows->sum(fn($r) => (int) $r->qty);
+        $totalQtyPrev = (int) $prevQtyRows->sum(fn($r) => (int) $r->qty);
+        $totalOrders = (int) $omzetRows->sum(fn($r) => (int) $r->order_count);
+        $totalOrdersPrev = (int) $prevOmzetRows->sum(fn($r) => (int) $r->order_count);
 
-        $allFors = $omzetRows->keys()->merge($qtyRows->keys())->unique();
-        $items = $allFors->map(function ($for) use ($omzetRows, $qtyRows, $labels, $totalOmzet) {
-            $omzet = (int) ($omzetRows[$for]->omzet ?? 0);
-            // Kolom `sales_orders.for` (tinyint) bisa berupa int di production
-            // atau string di test factory. Normalisasi ke string supaya label
-            // lookup & kontrak JSON konsisten lintas environment.
+        // Selalu sertakan 3 channel utama: Online (3), Direct (1), Employee (2)
+        $allFors = collect(['3', '1', '2'])
+            ->merge($omzetRows->keys())
+            ->merge($qtyRows->keys())
+            ->unique();
+
+        $items = $allFors->map(function ($for) use ($omzetRows, $qtyRows, $prevOmzetRows, $prevQtyRows, $labels, $totalOmzet) {
             $forKey = (string) $for;
+            $omzet = (int) ($omzetRows[$forKey]->omzet ?? 0);
+            $omzetPrev = (int) ($prevOmzetRows[$forKey]->omzet ?? 0);
+            $qty = (int) ($qtyRows[$forKey]->qty ?? 0);
+            $qtyPrev = (int) ($prevQtyRows[$forKey]->qty ?? 0);
+            $orderCount = (int) ($omzetRows[$forKey]->order_count ?? 0);
+            $orderCountPrev = (int) ($prevOmzetRows[$forKey]->order_count ?? 0);
+
             return [
-                'channel'       => $forKey,
-                'channel_label' => $labels[$forKey] ?? "Unknown ({$forKey})",
-                'omzet'         => $omzet,
-                'order_count'   => (int) ($omzetRows[$for]->order_count ?? 0),
-                'qty'           => (int) ($qtyRows[$for]->qty ?? 0),
-                'percentage'    => $totalOmzet > 0 ? round(($omzet / $totalOmzet) * 100, 1) : 0.0,
+                'channel'          => $forKey,
+                'channel_label'    => $labels[$forKey] ?? "Unknown ({$forKey})",
+                'omzet'            => $omzet,
+                'omzet_prev'       => $omzetPrev,
+                'order_count'      => $orderCount,
+                'order_count_prev' => $orderCountPrev,
+                'qty'              => $qty,
+                'qty_prev'         => $qtyPrev,
+                'percentage'       => $totalOmzet > 0 ? round(($omzet / $totalOmzet) * 100, 1) : 0.0,
             ];
         })->values();
 
         return [
-            'total_omzet' => $totalOmzet,
-            'items'       => $items,
+            'total_omzet'      => $totalOmzet,
+            'total_omzet_prev' => $totalOmzetPrev,
+            'total_qty'        => $totalQty,
+            'total_qty_prev'   => $totalQtyPrev,
+            'total_orders'     => $totalOrders,
+            'total_orders_prev'=> $totalOrdersPrev,
+            'prev_label'       => $prevLabel,
+            'compare_year'     => $compareYear,
+            'items'            => $items,
         ];
     }
 
     private function categoriesView(array $range, string $periode = 'today', ?int $compareYear = null): array
     {
-        // Tentukan rentang pembanding (YoY untuk year / natural untuk periode lainnya).
-        if ($compareYear !== null && $periode === 'year') {
+        // Tentukan rentang pembanding (YoY untuk year/last_year / natural untuk periode lainnya).
+        if ($compareYear !== null && ($periode === 'year' || $periode === 'last_year')) {
             [$prevRange] = $this->resolvePrevRangeAndBuckets($range, $periode, $compareYear);
             $prevLabel = (string) $compareYear;
         } else {
-            [$prevRange, $prevLabel] = $this->resolvePrevRangeNatural($range['from'], $range['to']);
+            [$prevRange, $prevLabel] = $this->resolvePrevRangeNatural($range['from'], $range['to'], $periode);
         }
 
         // Query data periode saat ini per online_category

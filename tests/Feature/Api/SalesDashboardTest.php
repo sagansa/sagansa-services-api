@@ -248,7 +248,7 @@ class SalesDashboardTest extends TestCase
         $res = $this->getJson('/sales-dashboard?periode=today&view=products&sort=qty');
 
         $res->assertOk()
-            ->assertJsonStructure(['data' => ['items', 'meta']]);
+            ->assertJsonStructure(['data' => ['items', 'meta', 'category_summary']]);
 
         $item = collect($res->json('data.items'))->firstWhere('product_id', $productId);
         $this->assertNotNull($item);
@@ -257,6 +257,7 @@ class SalesDashboardTest extends TestCase
         $this->assertArrayHasKey('qty_prev', $item);
         $this->assertArrayHasKey('revenue_prev', $item);
         $this->assertNotNull($item['product_name']);
+        $this->assertArrayHasKey('category_name', $item);
         $this->assertNotNull($res->json('data.meta.prev_label'));
     }
 

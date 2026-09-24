@@ -305,19 +305,19 @@ class SalesDashboardController extends Controller
         $now = Carbon::now('Asia/Jakarta');
         return match($periode) {
             'today', 'yesterday' => [
-                "DATE_FORMAT(created_at, '%H:00')",
+                "DATE_FORMAT(so.created_at, '%H:00')",
                 'hour',
                 array_map(fn($h) => sprintf('%02d:00', $h), range(0, 23)),
             ],
             'month' => [
-                "DATE(created_at)",
+                "DATE(so.created_at)",
                 'day',
                 collect(range(1, $now->day))->map(fn($d) =>
                     $now->format('Y-m-') . str_pad($d, 2, '0', STR_PAD_LEFT)
                 )->all(),
             ],
             'year' => [
-                "DATE_FORMAT(created_at, '%Y-%m')",
+                "DATE_FORMAT(so.created_at, '%Y-%m')",
                 'month',
                 array_map(fn($m) =>
                     $now->format('Y-') . str_pad($m, 2, '0', STR_PAD_LEFT), range(1, 12)
@@ -409,8 +409,9 @@ class SalesDashboardController extends Controller
         if ($rows->isNotEmpty()) {
             $products = DB::table('products')
                 ->leftJoin('units', 'products.unit_id', '=', 'units.id')
+                ->leftJoin('online_categories', 'products.online_category_id', '=', 'online_categories.id')
                 ->whereIn('products.id', $rows->pluck('product_id'))
-                ->select('products.id', 'products.name', 'units.unit')
+                ->select('products.id', 'products.name', 'units.unit', 'online_categories.name as category_name')
                 ->get()
                 ->keyBy('id');
 
@@ -430,19 +431,45 @@ class SalesDashboardController extends Controller
                 $p = $products->get($r->product_id);
                 $prev = $prevRows->get($r->product_id);
                 return [
-                    'product_id'   => (int) $r->product_id,
-                    'product_name' => $p?->name,
-                    'unit'         => $p?->unit,
-                    'qty'          => (int) $r->qty,
-                    'revenue'      => (int) $r->revenue,
-                    'qty_prev'     => (int) ($prev?->qty ?? 0),
-                    'revenue_prev' => (int) ($prev?->revenue ?? 0),
+                    'product_id'    => (int) $r->product_id,
+                    'product_name'  => $p?->name,
+                    'category_name' => $p?->category_name ?? 'Umum',
+                    'unit'          => $p?->unit,
+                    'qty'           => (int) $r->qty,
+                    'revenue'       => (int) $r->revenue,
+                    'qty_prev'      => (int) ($prev?->qty ?? 0),
+                    'revenue_prev'  => (int) ($prev?->revenue ?? 0),
                 ];
             })->values();
         }
 
+        // Ringkasan omzet per kategori produk
+        $categoryRows = $this->deliveredSalesOrders($range)
+            ->join('detail_sales_orders as dso', 'dso.sales_order_id', '=', 'so.id')
+            ->join('products as p', 'p.id', '=', 'dso.product_id')
+            ->leftJoin('online_categories as oc', 'oc.id', '=', 'p.online_category_id')
+            ->select(
+                DB::raw('COALESCE(oc.name, "Lainnya") as category_name'),
+                DB::raw('SUM(dso.quantity) as qty'),
+                DB::raw('SUM(dso.subtotal_price) as revenue')
+            )
+            ->groupBy('category_name')
+            ->orderBy('revenue', 'desc')
+            ->get();
+
+        $totalCategoryRevenue = (int) $categoryRows->sum('revenue');
+        $categorySummary = $categoryRows->map(function ($c) use ($totalCategoryRevenue) {
+            return [
+                'category_name' => (string) $c->category_name,
+                'qty'           => (int) $c->qty,
+                'revenue'       => (int) $c->revenue,
+                'percentage'    => $totalCategoryRevenue > 0 ? round(($c->revenue / $totalCategoryRevenue) * 100, 1) : 0.0,
+            ];
+        })->values();
+
         return [
-            'items' => $items,
+            'items'            => $items,
+            'category_summary' => $categorySummary,
             'meta'  => [
                 'current_page' => $page,
                 'last_page'    => $lastPage,

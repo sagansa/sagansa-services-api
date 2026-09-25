@@ -21,6 +21,7 @@ class SalesDashboardController extends Controller
 
         $validated = $request->validate([
             'periode' => ['nullable', 'in:today,yesterday,month,last_month,year,last_year'],
+            'year'    => ['nullable', 'integer', 'digits:4', 'between:2000,' . date('Y')],
             'view'    => ['nullable', 'in:summary,trend,products,channels,categories'],
             'page'    => ['nullable', 'integer', 'min:1'],
             'per_page'=> ['nullable', 'integer', 'min:1', 'max:200'],
@@ -29,7 +30,17 @@ class SalesDashboardController extends Controller
             'metric'  => ['nullable', 'in:omzet,order,qty'],
         ]);
 
-        $periode = $validated['periode'] ?? 'today';
+        $yearRaw = $validated['year'] ?? null;
+        $year    = null;
+        $currentYear = (int) Carbon::now('Asia/Jakarta')->format('Y');
+        if ($yearRaw !== null) {
+            $y = (int) $yearRaw;
+            if ($y >= 2000 && $y <= $currentYear) {
+                $year = $y;
+            }
+        }
+
+        $periode = $year !== null ? 'year' : ($validated['periode'] ?? 'today');
         $view    = $validated['view']    ?? 'summary';
         $page    = max(1, (int) ($validated['page'] ?? 1));
         $perPage = min(max(1, (int) ($validated['per_page'] ?? 50)), 200);
@@ -38,58 +49,77 @@ class SalesDashboardController extends Controller
 
         $compareYearRaw = $validated['compare_year'] ?? null;
         $compareYear = null;
+        $baseYear = $year ?? $currentYear;
         if ($compareYearRaw !== null) {
-            $currentYear = (int) Carbon::now('Asia/Jakarta')->format('Y');
-            $y = (int) $compareYearRaw;
-            if ($y >= 2000 && $y <= $currentYear && $y !== $currentYear) {
-                $compareYear = $y;
+            $cy = (int) $compareYearRaw;
+            if ($cy >= 2000 && $cy <= $baseYear && $cy !== $baseYear) {
+                $compareYear = $cy;
             }
         }
 
-        $range = $this->resolveRange($periode);
+        $range = $this->resolveRange($periode, $year);
 
         return match($view) {
             'summary'  => response()->json([
                 'success' => true,
                 'data'    => array_merge(
-                    ['view' => 'summary', 'periode' => $periode],
-                    $this->summaryView($range, $periode),
+                    ['view' => 'summary', 'periode' => $periode, 'year' => $year],
+                    $this->summaryView($range, $periode, $year),
                 ),
             ]),
             'trend'    => response()->json([
                 'success' => true,
                 'data'    => array_merge(
-                    ['view' => 'trend', 'periode' => $periode, 'metric' => $metric],
-                    $this->trendView($range, $periode, $compareYear, $metric),
+                    ['view' => 'trend', 'periode' => $periode, 'year' => $year, 'metric' => $metric],
+                    $this->trendView($range, $periode, $compareYear, $metric, $year),
                 ),
             ]),
             'products' => response()->json([
                 'success' => true,
                 'data'    => array_merge(
-                    ['view' => 'products', 'periode' => $periode, 'sort' => $sort],
-                    $this->productsView($range, $page, $perPage, $sort, $periode, $compareYear),
+                    ['view' => 'products', 'periode' => $periode, 'year' => $year, 'sort' => $sort],
+                    $this->productsView($range, $page, $perPage, $sort, $periode, $compareYear, $year),
                 ),
             ]),
             'channels' => response()->json([
                 'success' => true,
                 'data'    => array_merge(
-                    ['view' => 'channels', 'periode' => $periode],
-                    $this->channelsView($range, $periode, $compareYear),
+                    ['view' => 'channels', 'periode' => $periode, 'year' => $year],
+                    $this->channelsView($range, $periode, $compareYear, $year),
                 ),
             ]),
             'categories' => response()->json([
                 'success' => true,
                 'data'    => array_merge(
-                    ['view' => 'categories', 'periode' => $periode],
-                    $this->categoriesView($range, $periode, $compareYear),
+                    ['view' => 'categories', 'periode' => $periode, 'year' => $year],
+                    $this->categoriesView($range, $periode, $compareYear, $year),
                 ),
             ]),
         };
     }
 
-    private function resolveRange(string $periode): array
+    private function resolveRange(string $periode, ?int $year = null): array
     {
         $now = Carbon::now('Asia/Jakarta');
+        $currentYear = (int) $now->format('Y');
+
+        if ($year !== null) {
+            if ($year === $currentYear) {
+                return [
+                    'from'  => $now->copy()->startOfYear()->startOfDay()->toDateTimeString(),
+                    'to'    => $now->copy()->endOfDay()->toDateTimeString(),
+                    'label' => $now->format('Y') . ' (s/d hari ini)',
+                ];
+            } else {
+                $target = Carbon::create($year, 1, 1, 0, 0, 0, 'Asia/Jakarta');
+                return [
+                    'from'  => $target->copy()->startOfYear()->startOfDay()->toDateTimeString(),
+                    'to'    => $target->copy()->endOfYear()->endOfDay()->toDateTimeString(),
+                    'label' => (string) $year,
+                ];
+            }
+        }
+
         return match($periode) {
             'today'     => [
                 'from'  => $now->copy()->startOfDay()->toDateTimeString(),
@@ -147,7 +177,7 @@ class SalesDashboardController extends Controller
             ->whereBetween('so.created_at', [$range['from'], $range['to']]);
     }
 
-    private function summaryView(array $range, string $periode = 'today'): array
+    private function summaryView(array $range, string $periode = 'today', ?int $year = null): array
     {
         $omzet   = $this->deliveredSalesOrders($range)->sum('so.total_price');
         $orders  = $this->deliveredSalesOrders($range)->count('so.id');
@@ -156,7 +186,7 @@ class SalesDashboardController extends Controller
             ->sum('dso.quantity');
 
         // Pembanding periode natural (today↔kemarin, month↔bulan lalu paralel, dst).
-        [$prevRange, $prevLabel] = $this->resolvePrevRangeNatural($range['from'], $range['to'], $periode);
+        [$prevRange, $prevLabel] = $this->resolvePrevRangeNatural($range['from'], $range['to'], $periode, $year);
         $prevOmzet  = $this->deliveredSalesOrders($prevRange)->sum('so.total_price');
         $prevOrders = $this->deliveredSalesOrders($prevRange)->count('so.id');
         $prevQty    = $this->deliveredSalesOrders($prevRange)
@@ -184,9 +214,35 @@ class SalesDashboardController extends Controller
      * - year: tahun lalu 1 Jan..tgl/bulan sama paralel
      * - last_year: 2 tahun lalu (tahun penuh)
      */
-    private function resolvePrevRangeNatural(string $fromStr, string $toStr, string $periode = ''): array
+    private function resolvePrevRangeNatural(string $fromStr, string $toStr, string $periode = '', ?int $year = null): array
     {
         $now = Carbon::now('Asia/Jakarta');
+        $currentYear = (int) $now->format('Y');
+
+        if ($year !== null) {
+            $prevY = $year - 1;
+            if ($year === $currentYear) {
+                $prevYear = $now->copy()->subYear();
+                return [
+                    [
+                        'from'  => $prevYear->copy()->startOfYear()->startOfDay()->toDateTimeString(),
+                        'to'    => $prevYear->copy()->endOfDay()->toDateTimeString(),
+                        'label' => (string) $prevY,
+                    ],
+                    $prevY . ' (s/d ' . $prevYear->format('d M') . ')',
+                ];
+            } else {
+                $targetPrev = Carbon::create($prevY, 1, 1, 0, 0, 0, 'Asia/Jakarta');
+                return [
+                    [
+                        'from'  => $targetPrev->copy()->startOfYear()->startOfDay()->toDateTimeString(),
+                        'to'    => $targetPrev->copy()->endOfYear()->endOfDay()->toDateTimeString(),
+                        'label' => (string) $prevY,
+                    ],
+                    (string) $prevY,
+                ];
+            }
+        }
 
         if ($periode === 'today') {
             $prevDate = $now->copy()->subDay();
@@ -278,9 +334,9 @@ class SalesDashboardController extends Controller
         ];
     }
 
-    private function trendView(array $range, string $periode, ?int $compareYear, string $metric = 'omzet'): array
+    private function trendView(array $range, string $periode, ?int $compareYear, string $metric = 'omzet', ?int $year = null): array
     {
-        [$selectExpr, $interval, $allBuckets] = $this->trendConfig($periode);
+        [$selectExpr, $interval, $allBuckets] = $this->trendConfig($periode, $year);
         $valueExpr = $this->metricExpr($metric);
         $needsJoin = $metric === 'qty'; // qty butuh join ke detail_sales_orders
 
@@ -347,7 +403,7 @@ class SalesDashboardController extends Controller
         };
     }
 
-    private function trendConfig(string $periode): array
+    private function trendConfig(string $periode, ?int $year = null): array
     {
         $now = Carbon::now('Asia/Jakarta');
         return match($periode) {
@@ -374,7 +430,7 @@ class SalesDashboardController extends Controller
                 "DATE_FORMAT(so.created_at, '%Y-%m')",
                 'month',
                 array_map(fn($m) =>
-                    $now->format('Y-') . str_pad($m, 2, '0', STR_PAD_LEFT), range(1, 12)
+                    sprintf('%04d-%02d', $year ?? (int) $now->format('Y'), $m), range(1, 12)
                 ),
             ],
             'last_year' => [
@@ -436,7 +492,7 @@ class SalesDashboardController extends Controller
         return [$prevRange, $prevBuckets];
     }
 
-    private function productsView(array $range, int $page, int $perPage, string $sort, string $periode = 'today', ?int $compareYear = null): array
+    private function productsView(array $range, int $page, int $perPage, string $sort, string $periode = 'today', ?int $compareYear = null, ?int $year = null): array
     {
         $baseQuery = $this->deliveredSalesOrders($range)
             ->join('detail_sales_orders as dso', 'dso.sales_order_id', '=', 'so.id')
@@ -465,7 +521,7 @@ class SalesDashboardController extends Controller
             [$prevRange] = $this->resolvePrevRangeAndBuckets($range, $periode, $compareYear);
             $prevLabel = (string) $compareYear;
         } else {
-            [$prevRange, $prevLabel] = $this->resolvePrevRangeNatural($range['from'], $range['to'], $periode);
+            [$prevRange, $prevLabel] = $this->resolvePrevRangeNatural($range['from'], $range['to'], $periode, $year);
         }
 
         $items = $rows;
@@ -543,14 +599,14 @@ class SalesDashboardController extends Controller
         ];
     }
 
-    private function channelsView(array $range, string $periode = 'today', ?int $compareYear = null): array
+    private function channelsView(array $range, string $periode = 'today', ?int $compareYear = null, ?int $year = null): array
     {
         // Tentukan rentang pembanding (YoY untuk year/last_year / natural untuk periode lainnya).
         if ($compareYear !== null && ($periode === 'year' || $periode === 'last_year')) {
             [$prevRange] = $this->resolvePrevRangeAndBuckets($range, $periode, $compareYear);
             $prevLabel = (string) $compareYear;
         } else {
-            [$prevRange, $prevLabel] = $this->resolvePrevRangeNatural($range['from'], $range['to'], $periode);
+            [$prevRange, $prevLabel] = $this->resolvePrevRangeNatural($range['from'], $range['to'], $periode, $year);
         }
 
         // Current period: Omzet + order_count per channel
@@ -632,14 +688,14 @@ class SalesDashboardController extends Controller
         ];
     }
 
-    private function categoriesView(array $range, string $periode = 'today', ?int $compareYear = null): array
+    private function categoriesView(array $range, string $periode = 'today', ?int $compareYear = null, ?int $year = null): array
     {
         // Tentukan rentang pembanding (YoY untuk year/last_year / natural untuk periode lainnya).
         if ($compareYear !== null && ($periode === 'year' || $periode === 'last_year')) {
             [$prevRange] = $this->resolvePrevRangeAndBuckets($range, $periode, $compareYear);
             $prevLabel = (string) $compareYear;
         } else {
-            [$prevRange, $prevLabel] = $this->resolvePrevRangeNatural($range['from'], $range['to'], $periode);
+            [$prevRange, $prevLabel] = $this->resolvePrevRangeNatural($range['from'], $range['to'], $periode, $year);
         }
 
         // Query data periode saat ini per online_category

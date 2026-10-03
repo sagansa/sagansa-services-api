@@ -1389,21 +1389,33 @@ class ProcurementController extends Controller
             }
         }
 
-        // Validate all selected items share the same non-null supplier.
-        $supplierIds = $fuelServices->pluck('supplier_id')->unique()->filter()->values();
-        if ($supplierIds->isEmpty()) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Tidak ada supplier yang terkait dengan item yang dipilih. Lengkapi data supplier pada item bensin/servis terlebih dahulu.'
-            ], 422);
+        // Validasi supplier: hanya item Servis (fuel_service == '2') yang
+        // dibayar ke rekening supplier, sehingga wajib satu supplier sama.
+        // Item Bensin (fuel_service == '1') adalah reimbursement ke rekening
+        // user pembuat item — beda supplier (atau tanpa supplier) diijinkan.
+        $serviceItems = $fuelServices->where('fuel_service', '2');
+        $serviceSupplierIds = $serviceItems->pluck('supplier_id')->unique()->filter()->values();
+        if (!$serviceItems->isEmpty()) {
+            if ($serviceSupplierIds->isEmpty()) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Item servis wajib memiliki data supplier. Lengkapi data supplier pada item servis terlebih dahulu.'
+                ], 422);
+            }
+            if ($serviceSupplierIds->count() > 1) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Item servis yang dipilih berasal dari supplier berbeda. Pilih item servis dari supplier yang sama untuk satu pembayaran.'
+                ], 422);
+            }
+            $commonSupplierId = $serviceSupplierIds->first();
+        } else {
+            // Semua item Bensin: supplier_id hanya diisi bila seluruh item
+            // berasal dari satu supplier yang sama; selain itu null karena
+            // pembayaran ditujukan ke rekening pembuat, bukan supplier.
+            $fuelSupplierIds = $fuelServices->pluck('supplier_id')->unique()->filter()->values();
+            $commonSupplierId = $fuelSupplierIds->count() === 1 ? $fuelSupplierIds->first() : null;
         }
-        if ($supplierIds->count() > 1) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Item yang dipilih berasal dari supplier berbeda. Pilih item dari supplier yang sama untuk satu pembayaran.'
-            ], 422);
-        }
-        $commonSupplierId = $supplierIds->first();
 
         $receipt = DB::transaction(function () use ($request, $fuelServiceIds, $fuelServices, $commonSupplierId) {
             $totalAmount = $request->total_amount ?? $fuelServices->sum('amount');
@@ -1547,21 +1559,29 @@ class ProcurementController extends Controller
             }
         }
 
-        // Validate all selected items share the same non-null supplier.
-        $supplierIds = $newFuelServices->pluck('supplier_id')->unique()->filter()->values();
-        if ($supplierIds->isEmpty()) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Tidak ada supplier yang terkait dengan item yang dipilih. Lengkapi data supplier pada item bensin/servis terlebih dahulu.'
-            ], 422);
+        // Validasi supplier (aturan sama dengan store): hanya item Servis
+        // (fuel_service == '2') yang wajib satu supplier sama; item Bensin
+        // (== '1') boleh beda supplier karena dibayar ke rekening pembuat.
+        $serviceItems = $newFuelServices->where('fuel_service', '2');
+        $serviceSupplierIds = $serviceItems->pluck('supplier_id')->unique()->filter()->values();
+        if (!$serviceItems->isEmpty()) {
+            if ($serviceSupplierIds->isEmpty()) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Item servis wajib memiliki data supplier. Lengkapi data supplier pada item servis terlebih dahulu.'
+                ], 422);
+            }
+            if ($serviceSupplierIds->count() > 1) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Item servis yang dipilih berasal dari supplier berbeda. Pilih item servis dari supplier yang sama untuk satu pembayaran.'
+                ], 422);
+            }
+            $commonSupplierId = $serviceSupplierIds->first();
+        } else {
+            $fuelSupplierIds = $newFuelServices->pluck('supplier_id')->unique()->filter()->values();
+            $commonSupplierId = $fuelSupplierIds->count() === 1 ? $fuelSupplierIds->first() : null;
         }
-        if ($supplierIds->count() > 1) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Item yang dipilih berasal dari supplier berbeda. Pilih item dari supplier yang sama untuk satu pembayaran.'
-            ], 422);
-        }
-        $commonSupplierId = $supplierIds->first();
 
         return DB::transaction(function () use ($request, $receipt, $newFuelServiceIds, $newFuelServices, $commonSupplierId) {
             $currentAttachedIds = $receipt->fuelServices()->pluck('fuel_services.id')->all();

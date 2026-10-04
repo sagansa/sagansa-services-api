@@ -104,7 +104,7 @@ class ProductionController extends Controller
                 'invoicePurchase',
                 fn ($q) => $q->where('store_id', $validated['store_id'])
             )
-            ->with(['detailRequest.product.unit', 'invoicePurchase:id,date,no_invoice'])
+            ->with(['detailRequest.product.unit', 'invoicePurchase:id,date'])
             ->orderBy('detail_invoices.id', 'asc')
             ->get();
 
@@ -119,7 +119,6 @@ class ProductionController extends Controller
                 'quantity_product'    => (float) $r->quantity_product,
                 'invoice_purchase_id' => $r->invoice_purchase_id,
                 'invoice_date'        => $r->invoicePurchase?->date,
-                'no_invoice'          => $r->invoicePurchase?->no_invoice,
             ])->values(),
         ]);
     }

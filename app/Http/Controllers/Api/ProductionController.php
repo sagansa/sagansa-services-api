@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Models\DetailInvoice;
 use App\Models\Production;
 use App\Models\ProductionItem;
 use App\Models\Recipe;
@@ -82,6 +83,47 @@ class ProductionController extends Controller
         ]);
     }
 
+    /**
+     * Daftar DetailInvoice yang masih tersedia (status '1') untuk dijadikan
+     * bahan baku produksi di sebuah toko — definisi yang sama dengan admin
+     * (ProductionMainFromsRelationManager: wajib pilih detail invoice
+     * berstatus '1'). Baris yang sudah terpakai produksi lain berstatus '2'
+     * dan otomatis tersaring keluar.
+     */
+    public function availableDetailInvoices(Request $request)
+    {
+        $this->authorizeAdmin($request);
+
+        $validated = $request->validate([
+            'store_id' => ['required', 'integer', 'exists:stores,id'],
+        ]);
+
+        $rows = DetailInvoice::query()
+            ->where('detail_invoices.status', '1')
+            ->whereHas(
+                'invoicePurchase',
+                fn ($q) => $q->where('store_id', $validated['store_id'])
+            )
+            ->with(['detailRequest.product.unit', 'invoicePurchase:id,date,no_invoice'])
+            ->orderBy('detail_invoices.id', 'asc')
+            ->get();
+
+        return response()->json([
+            'success' => true,
+            'data' => $rows->map(fn ($r) => [
+                'id'                  => $r->id,
+                'product_id'          => $r->detailRequest?->product_id,
+                'product_name'        => $r->detailRequest?->product?->name ?? '-',
+                'unit_id'             => $r->detailRequest?->product?->unit_id,
+                'unit_name'           => $r->detailRequest?->product?->unit?->unit ?? '',
+                'quantity_product'    => (float) $r->quantity_product,
+                'invoice_purchase_id' => $r->invoice_purchase_id,
+                'invoice_date'        => $r->invoicePurchase?->date,
+                'no_invoice'          => $r->invoicePurchase?->no_invoice,
+            ])->values(),
+        ]);
+    }
+
     public function show(Request $request, $id)
     {
         $this->authorizeAdmin($request);
@@ -152,8 +194,37 @@ class ProductionController extends Controller
 
         $data = $validator->validated();
 
+        // Aturan definisi produksi (mengikuti admin ProductionMainFrom):
+        // produksi wajib punya minimal satu bahan baku yang diambil dari
+        // detail invoice pembelian, dan baris tersebut dipakai eksklusif
+        // (detail invoice berubah jadi '2' begitu dipakai produksi).
+        $invoiceDetailIds = collect($data['items'] ?? [])
+            ->filter(fn ($i) => !empty($i['detail_invoice_id']))
+            ->pluck('detail_invoice_id')
+            ->unique()
+            ->values()
+            ->all();
+
+        if (empty($invoiceDetailIds)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Produksi wajib dibuat berdasarkan invoice: pilih minimal satu bahan baku dari invoice pembelian.',
+            ], 422);
+        }
+
+        $consumed = DetailInvoice::whereIn('id', $invoiceDetailIds)
+            ->where('status', '!=', '1')
+            ->pluck('id');
+        if ($consumed->isNotEmpty()) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Detail invoice #' . $consumed->implode(', #') .
+                    ' sudah dipakai produksi lain. Pilih bahan baku dari invoice yang belum terpakai.',
+            ], 422);
+        }
+
         try {
-            $production = DB::connection('mysql')->transaction(function () use ($data, $request) {
+            $production = DB::connection('mysql')->transaction(function () use ($data, $request, $invoiceDetailIds) {
                 $production = Production::create([
                     'store_id'      => $data['store_id'],
                     'date'          => $data['date'],
@@ -170,16 +241,22 @@ class ProductionController extends Controller
 
                 // Tambah item manual bila ada (di luar resep).
                 foreach ($data['items'] ?? [] as $item) {
+                    $hasInvoice = !empty($item['detail_invoice_id']);
                     $production->items()->create([
                         'product_id'        => $item['product_id'],
-                        'direction'         => $item['direction'],
-                        'source'            => $item['source'] ?? 'manual',
+                        // Item bersumber invoice selalu bahan baku (input).
+                        'direction'         => $hasInvoice ? 'in' : $item['direction'],
+                        'source'            => $hasInvoice ? 'invoice' : ($item['source'] ?? 'manual'),
                         'quantity'          => $item['quantity'],
                         'unit_id'           => $item['unit_id'] ?? null,
                         'detail_invoice_id' => $item['detail_invoice_id'] ?? null,
                         'notes'             => $item['notes'] ?? null,
                     ]);
                 }
+
+                // Tandai detail invoice terpilih sudah terpakai (status '2'),
+                // konsisten dengan afterCreate admin ProductionMainFroms.
+                DetailInvoice::whereIn('id', $invoiceDetailIds)->update(['status' => '2']);
 
                 return $production;
             });
@@ -276,10 +353,35 @@ class ProductionController extends Controller
             ], 422);
         }
 
+        // Detail invoice hanya boleh dipakai satu produksi (status harus '1').
+        if ($detailInvoiceId = $request->input('detail_invoice_id')) {
+            $taken = DetailInvoice::where('id', $detailInvoiceId)
+                ->where('status', '!=', '1')
+                ->exists();
+            if ($taken) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Detail invoice #' . $detailInvoiceId .
+                        ' sudah dipakai produksi lain. Pilih bahan baku dari invoice yang belum terpakai.',
+                ], 422);
+            }
+        }
+
         $item = $production->items()->create(array_merge(
             ['source' => 'manual'],
-            $validator->validated()
+            $validator->validated(),
+            // Item bersumber invoice selalu bahan baku (input).
+            !empty($request->input('detail_invoice_id'))
+                ? ['direction' => 'in', 'source' => 'invoice']
+                : [],
         ));
+
+        // Konsumsi detail invoice (status '1' → '2') bila item merujuk invoice.
+        if ($detailInvoiceId = $request->input('detail_invoice_id')) {
+            DetailInvoice::where('id', $detailInvoiceId)
+                ->where('status', '1')
+                ->update(['status' => '2']);
+        }
 
         return response()->json([
             'success' => true,

@@ -95,7 +95,12 @@ class ProcurementController extends Controller
             'user', 
             'detailRequests.product.unit', 
             'detailRequests.paymentType'
-        ])->find($id);
+        ])
+            ->withCount([
+                'detailRequests as invoiced_items_count' => fn ($q) => $q
+                    ->whereHas('detailInvoices'),
+            ])
+            ->find($id);
 
         if (!$requestPurchase) {
             return response()->json([

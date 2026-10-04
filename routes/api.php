@@ -274,6 +274,8 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::prefix('productions')->group(function () {
         Route::get('/', [\App\Http\Controllers\Api\ProductionController::class, 'index']);
         Route::post('/', [\App\Http\Controllers\Api\ProductionController::class, 'store']);
+        // detail-invoices WAJIB sebelum /{id} agar tidak tertangkap wildcard.
+        Route::get('/detail-invoices', [\App\Http\Controllers\Api\ProductionController::class, 'availableDetailInvoices']);
         Route::get('/{id}', [\App\Http\Controllers\Api\ProductionController::class, 'show']);
         Route::put('/{id}', [\App\Http\Controllers\Api\ProductionController::class, 'update']);
         Route::post('/{id}/items', [\App\Http\Controllers\Api\ProductionController::class, 'addItem']);

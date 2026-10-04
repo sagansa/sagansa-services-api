@@ -34,6 +34,20 @@ class ClosingStoreController extends Controller
             $query->where('created_by_id', $user->id);
         }
 
+        // Filter (opsional) untuk riwayat tutup shift di mobile.
+        if ($storeId = $request->integer('store_id')) {
+            $query->where('store_id', $storeId);
+        }
+        if ($dateFrom = $request->input('date_from')) {
+            $query->where('date', '>=', $dateFrom);
+        }
+        if ($dateTo = $request->input('date_to')) {
+            $query->where('date', '<=', $dateTo);
+        }
+        if ($status = $request->input('status')) {
+            $query->where('status', $status);
+        }
+
         $perPage = $request->integer('per_page', 20);
         $list = $query->paginate($perPage);
 

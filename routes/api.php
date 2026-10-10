@@ -76,6 +76,10 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/{id}', [RecruitmentController::class, 'show']);
         Route::match(['post', 'put'], '/{id}/status', [RecruitmentController::class, 'setStatus']);
     });
+    // Daftar user + order direct (for=1) terakhirnya — admin & super_admin
+    // (role guard di controller, pola SalesDashboardController).
+    Route::get('/admin/last-orders', [\App\Http\Controllers\Api\AdminLastOrderController::class, 'index']);
+
     Route::get('/user-presence', [PresenceController::class, 'getUserPresence']);
     Route::get('/presences/today', [PresenceController::class, 'getAllTodayPresences']);
     Route::get('/presences/monthly', [PresenceController::class, 'monthly']);

@@ -79,6 +79,10 @@ Route::middleware('auth:sanctum')->group(function () {
     // Daftar user + order direct (for=1) terakhirnya — admin & super_admin
     // (role guard di controller, pola SalesDashboardController).
     Route::get('/admin/last-orders', [\App\Http\Controllers\Api\AdminLastOrderController::class, 'index']);
+    // Detail satu user: summary produk all-time + riwayat follow-up.
+    Route::get('/admin/last-orders/{userId}', [\App\Http\Controllers\Api\AdminLastOrderController::class, 'show']);
+    // Tandai user "sudah dihubungi" (petugas = admin yang login).
+    Route::post('/admin/last-orders/{userId}/follow-ups', [\App\Http\Controllers\Api\AdminLastOrderController::class, 'storeFollowUp']);
 
     Route::get('/user-presence', [PresenceController::class, 'getUserPresence']);
     Route::get('/presences/today', [PresenceController::class, 'getAllTodayPresences']);

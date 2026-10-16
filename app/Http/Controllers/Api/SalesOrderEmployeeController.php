@@ -18,14 +18,12 @@ use Illuminate\Support\Facades\Validator;
  * Penjualan oleh Sales (sales_orders.for = 2).
  *
  * Pemetaan role:
- *  - `sales` (AKTIF — bukan `former-employee`): CRUD milik sendiri
- *                     (ordered_by_id = Auth::id()).
- *                     Edit/hapus hanya jika payment_status != 2 (sudah valid).
+ *  - `sales`: CRUD milik sendiri (ordered_by_id = Auth::id()).
+ *             Termasuk `sales + former-employee` (sales eksternal) —
+ *             full paritas dengan sales aktif (keputusan 2026-10-16).
+ *             Edit/hapus hanya jika payment_status != 2 (sudah valid).
  *  - `admin/super_admin`: lihat SEMUA order, filter per sales, set
  *                     payment_status, hapus order apapun. Tidak bisa create.
- *  - `sales` + `former-employee`: DITOLAK (403) di semua endpoint — mantan
- *                     pegawai tidak boleh bertransaksi; di mobile mereka
- *                     hanya boleh mengumpulkan data calon konsumen.
  *  - Role lain (staff/supervisor/storage-staff): DITOLAK (403).
  *
  * Kontrak dipakai oleh mobile (mobiles/sagansa) — mengikuti SalesOrderEmployeesResource
@@ -127,7 +125,7 @@ class SalesOrderEmployeeController extends Controller
     {
         $user = $request->user();
         if (!$this->canSell($user)) {
-            return $this->forbidden('Hanya sales aktif yang dapat membuat penjualan employee.');
+            return $this->forbidden('Hanya sales yang dapat membuat penjualan employee.');
         }
 
         $validator = Validator::make($request->all(), [
@@ -201,7 +199,7 @@ class SalesOrderEmployeeController extends Controller
     {
         $user = $request->user();
         if (!$this->canSell($user)) {
-            return $this->forbidden('Hanya sales aktif yang dapat mengubah penjualan employee.');
+            return $this->forbidden('Hanya sales yang dapat mengubah penjualan employee.');
         }
 
         $order = SalesOrderEmployee::with('detailSalesOrders')->where('for', self::FOR)->find($id);
@@ -359,7 +357,7 @@ class SalesOrderEmployeeController extends Controller
     {
         $user = $request->user();
         if (!$this->canSell($user)) {
-            return $this->forbidden('Hanya sales aktif yang dapat membuat penjualan employee.');
+            return $this->forbidden('Hanya sales yang dapat membuat penjualan employee.');
         }
 
         $transferToAccounts = TransferToAccount::with('bank')
@@ -399,13 +397,12 @@ class SalesOrderEmployeeController extends Controller
     }
 
     /**
-     * Sales aktif = ber-role `sales` DAN TIDAK ber-role `former-employee`.
-     * Sales + former-employee (mantan pegawai) diblokir dari penjualan —
-     * di mobile mereka hanya boleh mengumpulkan data calon konsumen.
+     * Berjual = ber-role `sales` — termasuk `sales + former-employee`
+     * (sales eksternal yang tetap menjual, keputusan 2026-10-16).
      */
     private function canSell($user): bool
     {
-        return $user->hasRole('sales') && !$user->hasRole('former-employee');
+        return $user->hasRole('sales');
     }
 
     private function isAdminUser($user): bool
@@ -414,8 +411,8 @@ class SalesOrderEmployeeController extends Controller
     }
 
     /**
-     * Akses baca satu order (show): admin bebas; sales aktif hanya miliknya.
-     * Role lain (termasuk sales + former-employee) ditolak.
+     * Akses baca satu order (show): admin bebas; sales hanya miliknya
+     * (termasuk sales + former-employee). Role lain ditolak.
      * Mengembalikan response forbidden jika ditolak, null jika OK.
      */
     private function ensureCanAccess($user, SalesOrderEmployee $order): ?JsonResponse

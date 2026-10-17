@@ -377,7 +377,10 @@ class SalesOrderEmployeeController extends Controller
                 'name' => $d->delivery_address_name,
             ]);
 
+        // Filter sama dengan SalesOrderController::onlineProducts: produk
+        // kategori online "non" (4) tidak boleh dijual.
         $products = Product::with('unit')
+            ->whereNotIn('online_category_id', [4])
             ->orderBy('name')
             ->get(['id', 'name', 'unit_id'])
             ->map(fn ($p) => [

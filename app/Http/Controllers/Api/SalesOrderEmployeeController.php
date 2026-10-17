@@ -166,8 +166,8 @@ class SalesOrderEmployeeController extends Controller
                 'transfer_to_account_id' => $request->transfer_to_account_id,
                 'image_payment' => $request->input('image_payment'),
                 'notes' => $request->input('notes'),
-                'payment_status' => '1', // 1 = Belum Diperiksa
-                'delivery_status' => '1',
+                'payment_status' => 1, // 1 = Belum Diperiksa
+                'delivery_status' => 1,
                 'shipping_cost' => 0,
                 'ordered_by_id' => $user->id,
                 'total_price' => $totalPrice,

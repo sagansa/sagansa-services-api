@@ -14,8 +14,9 @@ use Illuminate\Support\Facades\DB;
 /**
  * Impor barang: tahapan fixed + kelengkapan dokumen + HPP per produk.
  *
- * Baca: semua user login. Tulis (create/update/advance/finalize/cancel):
- * admin & super_admin — guard in-controller, pola ProcurementController.
+ * SELURUH endpoint (baca & tulis) khusus admin/super_admin — guard
+ * in-controller, pola ProcurementController. Di UI mobile, menu hanya
+ * dimunculkan untuk role admin.
  */
 class ImportPurchaseController extends Controller
 {
@@ -44,6 +45,10 @@ class ImportPurchaseController extends Controller
 
     public function index(Request $request)
     {
+        if (!$this->isAdmin($request)) {
+            return $this->forbidden();
+        }
+
         $query = ImportPurchase::with(['supplier', 'createdBy', 'items.product.unit'])
             ->withCount('documents');
 
@@ -80,6 +85,10 @@ class ImportPurchaseController extends Controller
 
     public function summary(Request $request)
     {
+        if (!$this->isAdmin($request)) {
+            return $this->forbidden();
+        }
+
         return response()->json([
             'success' => true,
             'data' => [
@@ -104,6 +113,10 @@ class ImportPurchaseController extends Controller
 
     public function show($id, Request $request)
     {
+        if (!$this->isAdmin($request)) {
+            return $this->forbidden();
+        }
+
         $import = ImportPurchase::with([
             'supplier', 'store', 'createdBy',
             'items.product.unit', 'costs', 'documents',

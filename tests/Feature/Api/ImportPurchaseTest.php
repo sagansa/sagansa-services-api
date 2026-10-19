@@ -186,8 +186,15 @@ class ImportPurchaseTest extends TestCase
     public function test_show_includes_hpp_and_checklist(): void
     {
         $import = $this->makeImport();
-        Sanctum::actingAs($this->userWithRole('staff'));
 
+        // Staff tidak boleh membaca data impor (seluruh endpoint khusus
+        // admin/super_admin).
+        Sanctum::actingAs($this->userWithRole('staff'));
+        $this->getJson("/import-purchases/{$import->id}")->assertForbidden();
+        $this->getJson('/import-purchases')->assertForbidden();
+
+        // Admin melihat detail + hasil hitung + checklist.
+        Sanctum::actingAs($this->userWithRole('admin'));
         $res = $this->getJson("/import-purchases/{$import->id}");
 
         $res->assertOk()

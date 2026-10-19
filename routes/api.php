@@ -224,6 +224,23 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::post('/daily-salary-payment-receipts/{id}', [\App\Http\Controllers\Api\ProcurementController::class, 'updateDailySalaryPaymentReceipt']);
     });
 
+    // Impor barang: tahapan fixed + kelengkapan dokumen + HPP per produk.
+    // Tulis di-guard admin/super_admin di controller; baca untuk semua user.
+    Route::prefix('import-purchases')->group(function () {
+        Route::get('/', [\App\Http\Controllers\Api\ImportPurchaseController::class, 'index']);
+        // summary WAJIB sebelum /{id} agar tidak tertangkap wildcard.
+        Route::get('/summary', [\App\Http\Controllers\Api\ImportPurchaseController::class, 'summary']);
+        Route::post('/', [\App\Http\Controllers\Api\ImportPurchaseController::class, 'store']);
+        Route::get('/{id}', [\App\Http\Controllers\Api\ImportPurchaseController::class, 'show']);
+        Route::put('/{id}', [\App\Http\Controllers\Api\ImportPurchaseController::class, 'update']);
+        Route::post('/{id}/documents', [\App\Http\Controllers\Api\ImportPurchaseController::class, 'storeDocument']);
+        Route::delete('/{id}/documents/{docId}', [\App\Http\Controllers\Api\ImportPurchaseController::class, 'destroyDocument']);
+        Route::post('/{id}/receive', [\App\Http\Controllers\Api\ImportPurchaseController::class, 'receive']);
+        Route::post('/{id}/advance', [\App\Http\Controllers\Api\ImportPurchaseController::class, 'advance']);
+        Route::post('/{id}/finalize', [\App\Http\Controllers\Api\ImportPurchaseController::class, 'finalize']);
+        Route::post('/{id}/cancel', [\App\Http\Controllers\Api\ImportPurchaseController::class, 'cancel']);
+    });
+
     Route::prefix('storage-stocks')->group(function () {
         Route::get('/monitoring', [\App\Http\Controllers\Api\StorageStockController::class, 'stockMonitoring']);
         Route::get('/products', [\App\Http\Controllers\Api\StorageStockController::class, 'products']);

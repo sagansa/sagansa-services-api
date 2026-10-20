@@ -25,13 +25,15 @@ class SupplierController extends Controller
     {
         $query = Supplier::with(['province', 'city', 'district', 'subdistrict', 'postalCode', 'bank', 'user']);
 
-        // Search by name, bank account name, or account no
+        // Search by name, bank account name, account no, foreign city/bank
         if ($request->filled('search')) {
             $search = $request->search;
             $query->where(function ($q) use ($search) {
                 $q->where('name', 'like', "%{$search}%")
                   ->orWhere('bank_account_name', 'like', "%{$search}%")
-                  ->orWhere('bank_account_no', 'like', "%{$search}%");
+                  ->orWhere('bank_account_no', 'like', "%{$search}%")
+                  ->orWhere('city_name', 'like', "%{$search}%")
+                  ->orWhere('bank_name', 'like', "%{$search}%");
             });
         }
 
@@ -94,21 +96,16 @@ class SupplierController extends Controller
             ], 403);
         }
 
-        $validator = Validator::make($request->all(), [
+        $isForeign = $this->isForeignRequest($request);
+        $validator = Validator::make($request->all(), array_merge([
             'name' => 'required|string|max:255',
             'no_telp' => 'nullable|string|max:20',
             'address' => 'required|string',
-            'province_id' => 'required|exists:provinces,id',
-            'city_id' => 'required|exists:cities,id',
-            'district_id' => 'nullable|exists:districts,id',
-            'subdistrict_id' => 'nullable|exists:subdistricts,id',
-            'postal_code_id' => 'nullable|exists:postal_codes,id',
-            'bank_id' => 'nullable|exists:banks,id',
             'bank_account_name' => 'nullable|string|max:255',
             'bank_account_no' => 'nullable|string|max:50',
             'image' => 'nullable|string',
             'qris' => 'nullable|string',
-        ]);
+        ], $this->originRules($isForeign)));
 
         if ($validator->fails()) {
             return response()->json([
@@ -119,6 +116,7 @@ class SupplierController extends Controller
         }
 
         $data = $request->except(['image', 'status', 'user_id']);
+        $data = $this->normalizeOrigin($data, $isForeign);
         
         // Capital case formatting for name
         $data['name'] = ucwords(strtolower($request->name));
@@ -153,23 +151,17 @@ class SupplierController extends Controller
             ], 404);
         }
 
-        $validator = Validator::make($request->all(), [
+        $isForeign = $this->isForeignRequest($request);
+        $validator = Validator::make($request->all(), array_merge([
             'name' => 'sometimes|required|string|max:255',
-            'email' => 'sometimes|required|email|max:255|unique:suppliers,email,' . $id,
-            'phone' => 'sometimes|required|string|max:20',
-            'bank_id' => 'sometimes|required|exists:banks,id',
-            'bank_account_no' => 'sometimes|required|string|max:50',
-            'bank_account_name' => 'sometimes|required|string|max:255',
-            'province_id' => 'sometimes|required',
-            'city_id' => 'sometimes|required',
-            'district_id' => 'sometimes|required',
-            'subdistrict_id' => 'sometimes|required',
-            'postal_code_id' => 'sometimes|required',
+            'no_telp' => 'nullable|string|max:20',
             'address' => 'sometimes|required|string',
+            'bank_account_name' => 'nullable|string|max:255',
+            'bank_account_no' => 'nullable|string|max:50',
             'image' => 'nullable|string',
             'qris' => 'nullable|string',
             'status' => 'sometimes|integer|in:1,2,3',
-        ]);
+        ], $this->originRules($isForeign, partial: true)));
 
         if ($validator->fails()) {
             return response()->json([
@@ -180,6 +172,12 @@ class SupplierController extends Controller
         }
 
         $data = $request->except(['image', 'user_id']);
+
+        // Hanya form lengkap (membawa country_code) yang boleh mengubah asal
+        // supplier; update status/foto saja tidak menyentuh field asal.
+        if ($request->has('country_code')) {
+            $data = $this->normalizeOrigin($data, $isForeign);
+        }
 
         $user = $request->user();
         $isStaff = !$user->hasAnyRole(['supervisor', 'admin', 'super_admin']);
@@ -265,6 +263,71 @@ class SupplierController extends Controller
             'success' => true,
             'message' => 'Supplier berhasil dihapus.'
         ]);
+    }
+
+    /**
+     * Supplier luar negeri = country_code terisi dan bukan ID. Baris lama
+     * tanpa country_code tetap dibaca sebagai domestik.
+     */
+    private function isForeignRequest(Request $request): bool
+    {
+        $code = strtoupper(trim((string) $request->input('country_code', '')));
+
+        return $code !== '' && $code !== 'ID';
+    }
+
+    /**
+     * Aturan field asal supplier. Wilayah Indonesia (provinsi + kota) wajib
+     * hanya untuk domestik; supplier luar negeri wajib mengisi kota bebas.
+     * Mode partial (update) memakai `sometimes` agar PATCH parsial tetap sah.
+     */
+    private function originRules(bool $isForeign, bool $partial = false): array
+    {
+        $required = $partial ? 'sometimes|required' : 'required';
+        $region = $isForeign ? 'nullable' : $required;
+
+        return [
+            'country_code' => 'nullable|string|size:2',
+            'city_name' => ($isForeign ? $required : 'nullable') . '|string|max:100',
+            'currency' => 'nullable|string|size:3',
+            'province_id' => $region . '|exists:provinces,id',
+            'city_id' => $region . '|exists:cities,id',
+            'district_id' => 'nullable|exists:districts,id',
+            'subdistrict_id' => 'nullable|exists:subdistricts,id',
+            'postal_code_id' => 'nullable|exists:postal_codes,id',
+            'bank_id' => 'nullable|exists:banks,id',
+            'bank_name' => 'nullable|string|max:100',
+            'bank_swift_code' => 'nullable|string|max:11',
+        ];
+    }
+
+    /**
+     * Field yang hanya berlaku untuk salah satu asal dikosongkan supaya data
+     * tidak bercampur saat supplier berganti domestik ↔ luar negeri
+     * (wilayah/bank lokal/QRIS vs negara/kota bebas/valuta/bank LN).
+     */
+    private function normalizeOrigin(array $data, bool $isForeign): array
+    {
+        if ($isForeign) {
+            $data['country_code'] = strtoupper(trim($data['country_code']));
+            foreach (['province_id', 'city_id', 'district_id', 'subdistrict_id', 'postal_code_id', 'bank_id', 'qris'] as $field) {
+                $data[$field] = null;
+            }
+            foreach (['currency', 'bank_swift_code'] as $field) {
+                if (!empty($data[$field])) {
+                    $data[$field] = strtoupper(trim($data[$field]));
+                }
+            }
+
+            return $data;
+        }
+
+        $data['country_code'] = 'ID';
+        foreach (['city_name', 'currency', 'bank_name', 'bank_swift_code'] as $field) {
+            $data[$field] = null;
+        }
+
+        return $data;
     }
 
     /**

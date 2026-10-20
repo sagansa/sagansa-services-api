@@ -239,6 +239,7 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::post('/{id}/advance', [\App\Http\Controllers\Api\ImportPurchaseController::class, 'advance']);
         Route::post('/{id}/finalize', [\App\Http\Controllers\Api\ImportPurchaseController::class, 'finalize']);
         Route::post('/{id}/cancel', [\App\Http\Controllers\Api\ImportPurchaseController::class, 'cancel']);
+        Route::delete('/{id}', [\App\Http\Controllers\Api\ImportPurchaseController::class, 'destroy']);
     });
 
     Route::prefix('storage-stocks')->group(function () {

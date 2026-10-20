@@ -472,6 +472,55 @@ class ImportPurchaseController extends Controller
         return response()->json(['success' => true, 'message' => 'Proses impor dibatalkan.', 'data' => $import]);
     }
 
+    /**
+     * Hapus permanen proses impor beserta items, costs & dokumennya.
+     *
+     * Diperbolehkan untuk semua tahap KECUALI finalized — proses final sudah
+     * meng-update HPP master produk sehingga harus tetap tersimpan sebagai
+     * sumber historis (pakai cancel untuk mengarsipkan yang batal).
+     */
+    public function destroy($id, Request $request)
+    {
+        if (!$this->isAdmin($request)) {
+            return $this->forbidden();
+        }
+
+        $import = ImportPurchase::with('documents')->find($id);
+        if (!$import) {
+            return response()->json(['success' => false, 'message' => 'Proses impor tidak ditemukan.'], 404);
+        }
+        if ($import->stage === 'finalized') {
+            return response()->json([
+                'success' => false,
+                'message' => 'Proses impor sudah final dan tidak dapat dihapus (HPP produk tercatat dari proses ini).',
+            ], 422);
+        }
+
+        $documents = $import->documents->all();
+
+        DB::transaction(function () use ($import) {
+            $import->documents()->delete();
+            $import->items()->delete();
+            $import->costs()->delete();
+            $import->delete();
+        });
+
+        // Best-effort hapus file fisik dokumen di img service; kegagalan
+        // tidak boleh menggagalkan request (record sudah terhapus).
+        foreach ($documents as $document) {
+            try {
+                $this->storage->delete($document->file_path);
+            } catch (\Throwable $e) {
+                \Illuminate\Support\Facades\Log::error('Gagal hapus file dokumen impor di img service.', [
+                    'path' => $document->file_path,
+                    'message' => $e->getMessage(),
+                ]);
+            }
+        }
+
+        return response()->json(['success' => true, 'message' => 'Proses impor dihapus permanen.']);
+    }
+
     /* --------------------------------------------------------------- HELPER */
 
     /**

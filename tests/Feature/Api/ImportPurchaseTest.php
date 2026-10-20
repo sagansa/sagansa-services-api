@@ -328,6 +328,34 @@ class ImportPurchaseTest extends TestCase
             ->assertStatus(422);
     }
 
+    public function test_staff_cannot_delete_import(): void
+    {
+        $import = $this->makeImport();
+        Sanctum::actingAs($this->userWithRole('staff'));
+
+        $this->deleteJson("/import-purchases/{$import->id}")->assertForbidden();
+        $this->assertNotNull($import->fresh());
+    }
+
+    public function test_admin_can_delete_import_with_relations(): void
+    {
+        $import = $this->makeImport();
+        $this->attachDocument($import, 'invoice');
+
+        $this->deleteJson("/import-purchases/{$import->id}")->assertOk();
+        $this->assertNull($import->fresh());
+        $this->assertSame(0, ImportDocument::where('import_purchase_id', $import->id)->count());
+    }
+
+    public function test_finalized_import_cannot_be_deleted(): void
+    {
+        $import = $this->makeImport();
+        $import->update(['stage' => 'finalized']);
+
+        $this->deleteJson("/import-purchases/{$import->id}")->assertStatus(422);
+        $this->assertNotNull($import->fresh());
+    }
+
     protected function tearDown(): void
     {
         // Bersihkan hanya data yang dibuat test ini (DB dev dipakai bersama).

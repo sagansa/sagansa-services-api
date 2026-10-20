@@ -104,11 +104,19 @@ class ImportPurchaseController extends Controller
 
     private function stageCounts(): array
     {
-        return ImportPurchase::query()
+        $counts = ImportPurchase::query()
             ->select('stage', DB::raw('count(*) as total'))
             ->groupBy('stage')
             ->pluck('total', 'stage')
             ->all();
+
+        // Array PHP kosong diserialisasi menjadi JSON [] (list), bukan {},
+        // dan client mobile meng-cast nilai ini ke Map. Prefill seluruh
+        // tahap dengan 0 agar bentuknya selalu object.
+        return array_merge(
+            array_fill_keys([...ImportHppService::STAGES, ImportHppService::STAGE_CANCELLED], 0),
+            $counts,
+        );
     }
 
     public function show($id, Request $request)

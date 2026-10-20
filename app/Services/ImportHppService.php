@@ -349,7 +349,9 @@ class ImportHppService
 
             $out[$stage] = [
                 'label' => self::STAGE_LABELS[$stage],
-                'documents' => $docs,
+                // Array kosong menjadi JSON [] (list); client mobile meng-cast
+                // ke Map, jadi tahap tanpa dokumen dikirim sebagai {}.
+                'documents' => $docs === [] ? new \stdClass() : $docs,
                 'state' => $currentIdx === false
                     ? 'upcoming'
                     : ($i < $currentIdx ? 'done' : ($i === $currentIdx ? 'current' : 'upcoming')),

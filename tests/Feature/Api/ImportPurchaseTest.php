@@ -7,6 +7,7 @@ use App\Models\ImportPurchase;
 use App\Models\Product;
 use App\Models\Supplier;
 use App\Models\User;
+use App\Services\ImportHppService;
 use Laravel\Sanctum\Sanctum;
 use Tests\TestCase;
 
@@ -202,6 +203,44 @@ class ImportPurchaseTest extends TestCase
             ->assertJsonPath('next_stage', 'payment');
         $this->assertNotEmpty($res->json('hpp.items'));
         $this->assertArrayHasKey('payment', $res->json('checklist'));
+    }
+
+    public function test_index_stage_counts_is_json_object_when_table_empty(): void
+    {
+        // Reproduksi crash mobile "List<dynamic> is not a subtype of
+        // Map<String, dynamic>?": array PHP kosong dari pluck() diserialisasi
+        // menjadi JSON [] (list), bukan {}. Transaksi di-rollback — DB dev
+        // dipakai bersama.
+        \DB::beginTransaction();
+        try {
+            ImportPurchase::query()->delete();
+
+            Sanctum::actingAs($this->userWithRole('admin'));
+
+            $counts = $this->getJson('/import-purchases')
+                ->assertOk()
+                ->json('meta.stage_counts');
+
+            $this->assertIsArray($counts);
+            $this->assertFalse(array_is_list($counts), 'stage_counts harus object JSON, bukan list.');
+            foreach ([...ImportHppService::STAGES, ImportHppService::STAGE_CANCELLED] as $stage) {
+                $this->assertSame(0, $counts[$stage] ?? null, "Tahap {$stage} harus terisi 0.");
+            }
+        } finally {
+            \DB::rollBack();
+        }
+    }
+
+    public function test_show_checklist_documents_empty_is_json_object(): void
+    {
+        $import = $this->makeImport(); // draft: tanpa dokumen wajib & belum upload.
+
+        Sanctum::actingAs($this->userWithRole('admin'));
+
+        $res = $this->getJson("/import-purchases/{$import->id}")->assertOk();
+
+        // documents kosong harus {} (object), bukan [] — mobile meng-cast Map.
+        $this->assertStringContainsString('"documents":{}', $res->getContent());
     }
 
     public function test_document_rejects_foreign_path_prefix(): void

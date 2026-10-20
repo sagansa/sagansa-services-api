@@ -97,6 +97,15 @@ class SupplierController extends Controller
         }
 
         $isForeign = $this->isForeignRequest($request);
+
+        // Supplier luar negeri hanya boleh dibuat/diubah oleh admin.
+        if ($isForeign && !$user->hasAnyRole(['admin', 'super_admin'])) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Supplier luar negeri hanya dapat dibuat oleh admin.'
+            ], 403);
+        }
+
         $validator = Validator::make($request->all(), array_merge([
             'name' => 'required|string|max:255',
             'no_telp' => 'nullable|string|max:20',
@@ -152,6 +161,18 @@ class SupplierController extends Controller
         }
 
         $isForeign = $this->isForeignRequest($request);
+        $user = $request->user();
+
+        // Supplier luar negeri (termasuk mengubah supplier menjadi luar
+        // negeri) hanya boleh oleh admin; supervisor tetap bisa mengubah
+        // supplier domestik.
+        if ($isForeign && !$user->hasAnyRole(['admin', 'super_admin'])) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Supplier luar negeri hanya dapat dibuat oleh admin.'
+            ], 403);
+        }
+
         $validator = Validator::make($request->all(), array_merge([
             'name' => 'sometimes|required|string|max:255',
             'no_telp' => 'nullable|string|max:20',
@@ -179,7 +200,6 @@ class SupplierController extends Controller
             $data = $this->normalizeOrigin($data, $isForeign);
         }
 
-        $user = $request->user();
         $isStaff = !$user->hasAnyRole(['supervisor', 'admin', 'super_admin']);
 
         // Staff can only update image — strip all other fields

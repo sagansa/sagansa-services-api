@@ -355,10 +355,16 @@ class ImportPurchaseController extends Controller
             return $this->forbidden();
         }
 
+        $request->validate([
+            'bypass_documents' => 'sometimes|boolean',
+        ]);
+
         $import = ImportPurchase::with(['items', 'documents'])->find($id);
         if (!$import) {
             return response()->json(['success' => false, 'message' => 'Proses impor tidak ditemukan.'], 404);
         }
+
+        $bypass = $request->boolean('bypass_documents');
 
         $blockers = $this->hpp->blockersForAdvance(
             $import->stage,
@@ -368,6 +374,7 @@ class ImportPurchaseController extends Controller
                 'quantity_received' => $i->quantity_received,
             ])->all(),
             (float) $import->exchange_rate,
+            $bypass,
         );
 
         if ($blockers) {
@@ -378,9 +385,26 @@ class ImportPurchaseController extends Controller
             ], 422);
         }
 
-        $import->stage = $this->hpp->nextStage($import->stage);
+        // Tangkap sebelum stage dimutasi — untuk log jejak bypass.
+        $from = $import->stage;
+        $skipped = $bypass ? $this->hpp->missingDocuments($from, $import->uploadedDocumentTypes()) : [];
+
+        $import->stage = $this->hpp->nextStage($from);
         $import->save();
         $this->refreshTotals($import);
+
+        if ($skipped !== []) {
+            \Illuminate\Support\Facades\Log::info('Impor: advance bypass dokumen', [
+                'user_id' => $request->user()->id,
+                'import_purchase_id' => $import->id,
+                'from_stage' => $from,
+                'to_stage' => $import->stage,
+                'skipped_documents' => array_map(
+                    fn (string $type) => ImportHppService::DOCUMENT_LABELS[$type] ?? $type,
+                    $skipped,
+                ),
+            ]);
+        }
 
         return response()->json([
             'success' => true,

@@ -51,7 +51,7 @@ class ImportPurchaseController extends Controller
             return $this->forbidden();
         }
 
-        $query = ImportPurchase::with(['supplier', 'createdBy', 'items.product.unit'])
+        $query = ImportPurchase::with(['supplier', 'createdBy', 'items.product.unit', 'costs'])
             ->withCount('documents')
             ->withSum('payments as payments_total', 'amount');
 
@@ -71,9 +71,17 @@ class ImportPurchaseController extends Controller
         $perPage = $request->integer('per_page', 20);
         $paginated = $query->orderByDesc('id')->paginate($perPage);
 
+        // Harga satuan per produk untuk kartu list: realisasi bila barang
+        // sudah diterima/final, selain itu estimasi. Nilai dihitung dari
+        // item + biaya (tidak mengubah snapshot hpp di DB).
+        $rows = collect($paginated->items())
+            ->map(fn (ImportPurchase $import) => $this->withUnitPrices($import))
+            ->values()
+            ->all();
+
         return response()->json([
             'success' => true,
-            'data' => $paginated->items(),
+            'data' => $rows,
             'meta' => [
                 'stage_counts' => $this->stageCounts(),
             ],
@@ -102,6 +110,91 @@ class ImportPurchaseController extends Controller
                 'document_labels' => ImportHppService::DOCUMENT_LABELS,
                 'required_documents' => ImportHppService::REQUIRED_DOCUMENTS,
             ],
+        ]);
+    }
+
+    /**
+     * Trend harga satuan seluruh produk dari semua proses impor (kecuali
+     * dibatalkan). Tiap titik membawa harga valuta asli (USD) dan harga
+     * rupiah per satuan: HPP realisasi bila barang sudah diterima/final,
+     * selain itu estimasi.
+     */
+    public function priceTrends(Request $request)
+    {
+        if (! $this->isAdmin($request)) {
+            return $this->forbidden();
+        }
+
+        $imports = ImportPurchase::with(['supplier', 'items.product.unit', 'costs'])
+            ->where('stage', '!=', ImportHppService::STAGE_CANCELLED)
+            ->orderBy('purchase_date')
+            ->orderBy('id')
+            ->get();
+
+        $products = [];
+
+        foreach ($imports as $import) {
+            $computed = $this->computeFor($import);
+            $computedItems = collect($computed['items'])->keyBy('id');
+
+            foreach ($import->items as $item) {
+                $row = $computedItems->get($item->id);
+                if (! $row) {
+                    continue;
+                }
+
+                $productId = (int) $item->product_id;
+                $product = $item->product;
+                $isRealized = $this->isItemRealized($import, $item);
+                $unitPriceIdr = $isRealized
+                    ? (float) $row['hpp_real_unit']
+                    : (float) $row['hpp_estimate_unit'];
+
+                if (! isset($products[$productId])) {
+                    $products[$productId] = [
+                        'product_id' => $productId,
+                        'product_name' => $product?->name ?? 'Produk #'.$productId,
+                        'unit_name' => $product?->unit?->unit ?? '',
+                        'currency' => $import->currency,
+                        'points' => [],
+                    ];
+                }
+
+                $products[$productId]['points'][] = [
+                    'import_id' => $import->id,
+                    'date' => $import->purchase_date?->toDateString()
+                        ?? $import->created_at?->toDateString(),
+                    'supplier_name' => $import->supplier?->name,
+                    'currency' => $import->currency,
+                    'exchange_rate' => (float) $import->exchange_rate,
+                    'quantity' => (float) $item->quantity,
+                    'quantity_received' => $item->quantity_received === null
+                        ? null
+                        : (float) $item->quantity_received,
+                    'unit_price_foreign' => round((float) $item->unit_price_foreign, 4),
+                    'unit_price_idr' => round($unitPriceIdr, 2),
+                    'unit_price_idr_estimate' => round((float) $row['hpp_estimate_unit'], 2),
+                    'unit_price_idr_real' => round((float) $row['hpp_real_unit'], 2),
+                    'is_realized' => $isRealized,
+                ];
+            }
+        }
+
+        $data = collect($products)
+            ->map(function (array $product) {
+                usort($product['points'], function (array $a, array $b) {
+                    return [$a['date'], $a['import_id']] <=> [$b['date'], $b['import_id']];
+                });
+
+                return $product;
+            })
+            ->sortBy('product_name', SORT_NATURAL | SORT_FLAG_CASE)
+            ->values()
+            ->all();
+
+        return response()->json([
+            'success' => true,
+            'data' => $data,
         ]);
     }
 
@@ -914,6 +1007,47 @@ class ImportPurchaseController extends Controller
             $import->costs,
             (float) $import->exchange_rate,
         );
+    }
+
+    /**
+     * Tambahkan harga satuan per item pada payload list tanpa menyentuh
+     * snapshot DB. Realisasi dipakai bila qty diterima sudah ada atau proses
+     * final; selain itu estimasi.
+     */
+    private function withUnitPrices(ImportPurchase $import): ImportPurchase
+    {
+        $computed = $this->computeFor($import);
+        $rows = collect($computed['items'])->keyBy('id');
+
+        foreach ($import->items as $item) {
+            $row = $rows->get($item->id);
+            if (! $row) {
+                continue;
+            }
+
+            $isRealized = $this->isItemRealized($import, $item);
+            $unitPriceIdr = $isRealized
+                ? (float) $row['hpp_real_unit']
+                : (float) $row['hpp_estimate_unit'];
+
+            $item->setAttribute('hpp_estimate_unit', round((float) $row['hpp_estimate_unit'], 2));
+            $item->setAttribute('hpp_real_unit', round((float) $row['hpp_real_unit'], 2));
+            $item->setAttribute('unit_price_idr', round($unitPriceIdr, 2));
+            $item->setAttribute('price_is_realized', $isRealized);
+        }
+
+        return $import;
+    }
+
+    /**
+     * Realisasi per produk = qty diterima sudah diisi atau proses final.
+     * Realisasi biaya saja (tanpa qty diterima) tetap dianggap estimasi
+     * karena pembagi HPP memakai qty beli.
+     */
+    private function isItemRealized(ImportPurchase $import, $item): bool
+    {
+        return $import->stage === 'finalized'
+            || (float) ($item->quantity_received ?? 0) > 0;
     }
 
     /**

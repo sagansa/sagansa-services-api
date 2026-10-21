@@ -228,8 +228,10 @@ Route::middleware('auth:sanctum')->group(function () {
     // Tulis di-guard admin/super_admin di controller; baca untuk semua user.
     Route::prefix('import-purchases')->group(function () {
         Route::get('/', [\App\Http\Controllers\Api\ImportPurchaseController::class, 'index']);
-        // summary WAJIB sebelum /{id} agar tidak tertangkap wildcard.
+        // summary & price-trends WAJIB sebelum /{id} agar tidak tertangkap
+        // wildcard.
         Route::get('/summary', [\App\Http\Controllers\Api\ImportPurchaseController::class, 'summary']);
+        Route::get('/price-trends', [\App\Http\Controllers\Api\ImportPurchaseController::class, 'priceTrends']);
         Route::post('/', [\App\Http\Controllers\Api\ImportPurchaseController::class, 'store']);
         Route::get('/{id}', [\App\Http\Controllers\Api\ImportPurchaseController::class, 'show']);
         Route::put('/{id}', [\App\Http\Controllers\Api\ImportPurchaseController::class, 'update']);

@@ -598,6 +598,73 @@ class ImportPurchaseTest extends TestCase
         $this->assertNotNull($import->fresh());
     }
 
+    public function test_index_exposes_estimate_unit_price_then_realization_per_product(): void
+    {
+        $import = $this->makeImport();
+        $item = $import->items()->first();
+
+        $row = collect($this->getJson('/import-purchases')->assertOk()->json('data'))
+            ->firstWhere('id', $import->id);
+
+        $this->assertNotNull($row);
+        $this->assertFalse($row['items'][0]['price_is_realized']);
+        $this->assertEqualsWithDelta(
+            $row['items'][0]['hpp_estimate_unit'],
+            $row['items'][0]['unit_price_idr'],
+            0.01,
+        );
+
+        // Barang diterima → harga satuan list pindah ke realisasi.
+        $import->update(['stage' => 'receiving']);
+        $item->update(['quantity_received' => 11700]);
+
+        $row = collect($this->getJson('/import-purchases')->assertOk()->json('data'))
+            ->firstWhere('id', $import->id);
+
+        $this->assertTrue($row['items'][0]['price_is_realized']);
+        $this->assertEqualsWithDelta(
+            $row['items'][0]['hpp_real_unit'],
+            $row['items'][0]['unit_price_idr'],
+            0.01,
+        );
+    }
+
+    public function test_price_trends_include_usd_and_idr_with_estimate_fallback(): void
+    {
+        $import = $this->makeImport();
+        $item = $import->items()->first();
+
+        $product = collect($this->getJson('/import-purchases/price-trends')->assertOk()->json('data'))
+            ->firstWhere('product_id', $item->product_id);
+
+        $this->assertNotNull($product);
+        $point = collect($product['points'])->firstWhere('import_id', $import->id);
+        $this->assertNotNull($point);
+        $this->assertSame('USD', $point['currency']);
+        $this->assertEqualsWithDelta(0.78, (float) $point['unit_price_foreign'], 0.0001);
+        $this->assertFalse($point['is_realized']);
+        $this->assertEqualsWithDelta(
+            (float) $point['unit_price_idr_estimate'],
+            (float) $point['unit_price_idr'],
+            0.01,
+        );
+
+        // Realisasi qty diterima memakai HPP real pada titik trend.
+        $import->update(['stage' => 'receiving']);
+        $item->update(['quantity_received' => 11700]);
+
+        $product = collect($this->getJson('/import-purchases/price-trends')->assertOk()->json('data'))
+            ->firstWhere('product_id', $item->product_id);
+        $point = collect($product['points'])->firstWhere('import_id', $import->id);
+
+        $this->assertTrue($point['is_realized']);
+        $this->assertEqualsWithDelta(
+            (float) $point['unit_price_idr_real'],
+            (float) $point['unit_price_idr'],
+            0.01,
+        );
+    }
+
     protected function tearDown(): void
     {
         // Bersihkan hanya data yang dibuat test ini (DB dev dipakai bersama).

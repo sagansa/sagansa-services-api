@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Contracts\ImageStorageContract;
 use App\Http\Controllers\Controller;
+use App\Models\ImportCost;
 use App\Models\ImportDocument;
 use App\Models\ImportPurchase;
 use App\Services\ImportHppService;
@@ -136,6 +137,7 @@ class ImportPurchaseController extends Controller
         foreach ($imports as $import) {
             $computed = $this->computeFor($import);
             $computedItems = collect($computed['items'])->keyBy('id');
+            $hasRealization = $this->importHasRealization($import);
 
             foreach ($import->items as $item) {
                 $row = $computedItems->get($item->id);
@@ -145,7 +147,7 @@ class ImportPurchaseController extends Controller
 
                 $productId = (int) $item->product_id;
                 $product = $item->product;
-                $isRealized = $this->isItemRealized($import, $item);
+                $isRealized = $hasRealization;
                 $unitPriceIdr = $isRealized
                     ? (float) $row['hpp_real_unit']
                     : (float) $row['hpp_estimate_unit'];
@@ -1018,6 +1020,7 @@ class ImportPurchaseController extends Controller
     {
         $computed = $this->computeFor($import);
         $rows = collect($computed['items'])->keyBy('id');
+        $isRealized = $this->importHasRealization($import);
 
         foreach ($import->items as $item) {
             $row = $rows->get($item->id);
@@ -1025,7 +1028,6 @@ class ImportPurchaseController extends Controller
                 continue;
             }
 
-            $isRealized = $this->isItemRealized($import, $item);
             $unitPriceIdr = $isRealized
                 ? (float) $row['hpp_real_unit']
                 : (float) $row['hpp_estimate_unit'];
@@ -1040,14 +1042,26 @@ class ImportPurchaseController extends Controller
     }
 
     /**
-     * Realisasi per produk = qty diterima sudah diisi atau proses final.
-     * Realisasi biaya saja (tanpa qty diterima) tetap dianggap estimasi
-     * karena pembagi HPP memakai qty beli.
+     * Realisasi sudah ada bila qty diterima diisi, salah satu biaya punya
+     * nominal real, atau proses sudah final. Ini membuat input realisasi
+     * (mis. Rp 250.000.000) langsung menggeser harga satuan list dari
+     * estimasi ke realisasi tanpa harus menunggu penerimaan barang.
      */
-    private function isItemRealized(ImportPurchase $import, $item): bool
+    private function importHasRealization(ImportPurchase $import): bool
     {
-        return $import->stage === 'finalized'
-            || (float) ($item->quantity_received ?? 0) > 0;
+        if ($import->stage === 'finalized') {
+            return true;
+        }
+
+        if ($import->items->contains(
+            fn ($item) => (float) ($item->quantity_received ?? 0) > 0
+        )) {
+            return true;
+        }
+
+        return $import->costs->contains(
+            fn (ImportCost $cost) => $cost->amount_real !== null
+        );
     }
 
     /**

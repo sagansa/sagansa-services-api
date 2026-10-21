@@ -629,6 +629,44 @@ class ImportPurchaseTest extends TestCase
         );
     }
 
+    public function test_realization_input_switches_to_real_price_without_receiving(): void
+    {
+        $import = $this->makeImport();
+        $item = $import->items()->first();
+        $bank = $import->costs()->where('category', 'bank')->first();
+
+        // Realisasi biaya saja (barang belum diterima), nominal besar seperti
+        // input pengguna 250.000.000.
+        $this->postJson("/import-purchases/{$import->id}/receive", [
+            'costs' => [
+                ['id' => $bank->id, 'amount_real' => 250000000],
+            ],
+        ])->assertOk();
+
+        $row = collect($this->getJson('/import-purchases')->assertOk()->json('data'))
+            ->firstWhere('id', $import->id);
+        $this->assertTrue($row['items'][0]['price_is_realized']);
+        $this->assertGreaterThan(
+            $row['items'][0]['hpp_estimate_unit'],
+            $row['items'][0]['unit_price_idr'],
+        );
+        $this->assertEqualsWithDelta(
+            $row['items'][0]['hpp_real_unit'],
+            $row['items'][0]['unit_price_idr'],
+            0.01,
+        );
+
+        $product = collect($this->getJson('/import-purchases/price-trends')->assertOk()->json('data'))
+            ->firstWhere('product_id', $item->product_id);
+        $point = collect($product['points'])->firstWhere('import_id', $import->id);
+        $this->assertTrue($point['is_realized']);
+        $this->assertEqualsWithDelta(
+            (float) $point['unit_price_idr_real'],
+            (float) $point['unit_price_idr'],
+            0.01,
+        );
+    }
+
     public function test_price_trends_include_usd_and_idr_with_estimate_fallback(): void
     {
         $import = $this->makeImport();

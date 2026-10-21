@@ -473,6 +473,28 @@ class ImportPurchaseTest extends TestCase
         }
     }
 
+    public function test_index_orders_by_newest_purchase_date(): void
+    {
+        $older = $this->makeImport();
+        $older->update(['purchase_date' => '2026-09-01']);
+
+        $newer = $this->makeImport();
+        $newer->update(['purchase_date' => '2026-10-25']);
+
+        Sanctum::actingAs($this->userWithRole('admin'));
+
+        $ids = collect($this->getJson('/import-purchases')->assertOk()->json('data'))
+            ->pluck('id')
+            ->all();
+
+        $newerPosition = array_search($newer->id, $ids, true);
+        $olderPosition = array_search($older->id, $ids, true);
+
+        $this->assertNotFalse($newerPosition);
+        $this->assertNotFalse($olderPosition);
+        $this->assertLessThan($olderPosition, $newerPosition);
+    }
+
     public function test_show_checklist_documents_empty_is_json_object(): void
     {
         $import = $this->makeImport(); // draft: tanpa dokumen wajib & belum upload.

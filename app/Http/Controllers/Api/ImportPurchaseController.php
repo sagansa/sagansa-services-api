@@ -70,7 +70,12 @@ class ImportPurchaseController extends Controller
         }
 
         $perPage = $request->integer('per_page', 20);
-        $paginated = $query->orderByDesc('id')->paginate($perPage);
+        // List selalu tanggal transaksi terbaru lebih dulu; id menjadi
+        // tie-breaker agar urutan stabil untuk tanggal yang sama.
+        $paginated = $query
+            ->orderByDesc('purchase_date')
+            ->orderByDesc('id')
+            ->paginate($perPage);
 
         // Harga satuan per produk untuk kartu list: realisasi bila barang
         // sudah diterima/final, selain itu estimasi. Nilai dihitung dari

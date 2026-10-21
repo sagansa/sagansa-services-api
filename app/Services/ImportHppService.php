@@ -135,16 +135,30 @@ class ImportHppService
         $goodsTotal = $itemRows->sum('goods_value');
         $totalQuantity = $items->sum('quantity');
 
+        // Pembayaran/notul yang ada menggantikan real manual bank/diskon/pajak;
+        // estimasi manual tetap dipakai untuk kolom estimate.
+        $hasPaymentCosts = $costs->contains(fn (ImportCost $cost) => $cost->source === 'payment');
+        $hasNotulCosts = $costs->contains(fn (ImportCost $cost) => $cost->source === 'notul');
+
         // --- Biaya (estimate & real, dalam IDR) ---
-        $costRows = $costs->map(function (ImportCost $cost) use ($exchangeRate, $goodsTotal) {
-            $estimate = $this->costEstimateIdr($cost, $exchangeRate, $goodsTotal);
-            $real = $this->costRealIdr($cost, $exchangeRate, $goodsTotal);
+        $costRows = $costs->map(function (ImportCost $cost) use (
+            $exchangeRate, $goodsTotal, $hasPaymentCosts, $hasNotulCosts
+        ) {
+            $isDerived = $cost->source !== null;
+            $estimate = $isDerived ? 0 : $this->costEstimateIdr($cost, $exchangeRate, $goodsTotal);
+
+            $suppressReal = ! $isDerived && (
+                ($hasPaymentCosts && in_array($cost->category, ['bank', 'discount'], true))
+                || ($hasNotulCosts && $cost->category === 'tax')
+            );
+            $real = $suppressReal ? 0 : $this->costRealIdr($cost, $exchangeRate, $goodsTotal);
 
             return [
                 'id' => $cost->id,
                 'name' => $cost->name,
                 'stage' => $cost->stage,
                 'category' => $cost->category,
+                'source' => $cost->source,
                 'tax_rate' => $cost->tax_rate,
                 'estimate' => $estimate,
                 'real' => $real,
@@ -217,17 +231,27 @@ class ImportHppService
         if ($cost->category === 'tax' && $cost->tax_rate !== null) {
             return $cost->tax_rate / 100 * $goodsTotal;
         }
+
         if ($cost->is_foreign_currency && $cost->amount_foreign !== null) {
-            return $cost->amount_foreign * $exchangeRate;
+            $value = $cost->amount_foreign * $exchangeRate;
+        } else {
+            $value = (float) $cost->amount_estimate;
         }
 
-        return (float) $cost->amount_estimate;
+        // Diskon mengurangi total, bukan menambah.
+        return $cost->category === 'discount' ? -abs($value) : $value;
     }
 
     private function costRealIdr(ImportCost $cost, float $exchangeRate, float $goodsTotal): float
     {
+        if ($cost->source !== null) {
+            return (float) ($cost->amount_real ?? 0);
+        }
+
         if ($cost->amount_real !== null) {
-            return (float) $cost->amount_real;
+            $value = (float) $cost->amount_real;
+
+            return $cost->category === 'discount' ? -abs($value) : $value;
         }
 
         return $this->costEstimateIdr($cost, $exchangeRate, $goodsTotal);
@@ -257,7 +281,7 @@ class ImportHppService
     {
         $missing = [];
         foreach (self::REQUIRED_DOCUMENTS[$stage] ?? [] as $type) {
-            if (!in_array($type, $uploadedDocumentTypes, true)) {
+            if (! in_array($type, $uploadedDocumentTypes, true)) {
                 $missing[] = $type;
             }
         }
@@ -302,11 +326,11 @@ class ImportHppService
             }
         }
 
-        if (!$bypassDocuments) {
+        if (! $bypassDocuments) {
             foreach ($this->missingDocuments($stage, $uploadedDocumentTypes) as $type) {
                 $blockers[] = [
                     'kind' => 'document',
-                    'message' => 'Dokumen wajib belum diupload: ' . (self::DOCUMENT_LABELS[$type] ?? $type),
+                    'message' => 'Dokumen wajib belum diupload: '.(self::DOCUMENT_LABELS[$type] ?? $type),
                 ];
             }
         }
@@ -342,10 +366,9 @@ class ImportHppService
     /**
      * Checklist kelengkapan per tahap untuk UI detail.
      *
-     * @param  string  $currentStage
      * @param  array<int, string>  $uploadedDocumentTypes
      * @return array<string, array{label: string, documents: array<string, array{label: string, required: bool, present: bool}>, state: string}>
-     *         state: done | current | upcoming
+     *                                                                                                                                           state: done | current | upcoming
      */
     public function stageChecklist(string $currentStage, array $uploadedDocumentTypes): array
     {
@@ -371,7 +394,7 @@ class ImportHppService
                 'label' => self::STAGE_LABELS[$stage],
                 // Array kosong menjadi JSON [] (list); client mobile meng-cast
                 // ke Map, jadi tahap tanpa dokumen dikirim sebagai {}.
-                'documents' => $docs === [] ? new \stdClass() : $docs,
+                'documents' => $docs === [] ? new \stdClass : $docs,
                 'state' => $currentIdx === false
                     ? 'upcoming'
                     : ($i < $currentIdx ? 'done' : ($i === $currentIdx ? 'current' : 'upcoming')),

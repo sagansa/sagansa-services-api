@@ -2,14 +2,17 @@
 
 namespace App\Http\Controllers\Api;
 
-use App\Http\Controllers\Controller;
 use App\Contracts\ImageStorageContract;
-use App\Models\ImportCost;
+use App\Http\Controllers\Controller;
 use App\Models\ImportDocument;
 use App\Models\ImportPurchase;
 use App\Services\ImportHppService;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
+
+use function Illuminate\Support\defer;
 
 /**
  * Impor barang: tahapan fixed + kelengkapan dokumen + HPP per produk.
@@ -23,8 +26,7 @@ class ImportPurchaseController extends Controller
     public function __construct(
         protected ImportHppService $hpp,
         protected ImageStorageContract $storage,
-    ) {
-    }
+    ) {}
 
     private function isAdmin(Request $request): bool
     {
@@ -33,7 +35,7 @@ class ImportPurchaseController extends Controller
         return $user && ($user->hasRole('admin') || $user->hasRole('super_admin'));
     }
 
-    private function forbidden(): \Illuminate\Http\JsonResponse
+    private function forbidden(): JsonResponse
     {
         return response()->json([
             'success' => false,
@@ -45,12 +47,13 @@ class ImportPurchaseController extends Controller
 
     public function index(Request $request)
     {
-        if (!$this->isAdmin($request)) {
+        if (! $this->isAdmin($request)) {
             return $this->forbidden();
         }
 
         $query = ImportPurchase::with(['supplier', 'createdBy', 'items.product.unit'])
-            ->withCount('documents');
+            ->withCount('documents')
+            ->withSum('payments as payments_total', 'amount');
 
         if ($stage = $request->query('stage')) {
             $query->where('stage', $stage);
@@ -85,7 +88,7 @@ class ImportPurchaseController extends Controller
 
     public function summary(Request $request)
     {
-        if (!$this->isAdmin($request)) {
+        if (! $this->isAdmin($request)) {
             return $this->forbidden();
         }
 
@@ -121,16 +124,16 @@ class ImportPurchaseController extends Controller
 
     public function show($id, Request $request)
     {
-        if (!$this->isAdmin($request)) {
+        if (! $this->isAdmin($request)) {
             return $this->forbidden();
         }
 
         $import = ImportPurchase::with([
             'supplier', 'store', 'createdBy',
-            'items.product.unit', 'costs', 'documents',
+            'items.product.unit', 'costs', 'documents', 'payments', 'notuls',
         ])->find($id);
 
-        if (!$import) {
+        if (! $import) {
             return response()->json([
                 'success' => false,
                 'message' => 'Proses impor tidak ditemukan.',
@@ -150,7 +153,7 @@ class ImportPurchaseController extends Controller
 
     public function store(Request $request)
     {
-        if (!$this->isAdmin($request)) {
+        if (! $this->isAdmin($request)) {
             return $this->forbidden();
         }
 
@@ -162,6 +165,8 @@ class ImportPurchaseController extends Controller
                 'store_id' => $validated['store_id'] ?? null,
                 'currency' => $validated['currency'] ?? 'USD',
                 'exchange_rate' => $validated['exchange_rate'],
+                'invoice_number' => $validated['invoice_number'] ?? null,
+                'purchase_date' => $validated['purchase_date'] ?? now()->toDateString(),
                 'stage' => 'draft',
                 'notes' => $validated['notes'] ?? null,
                 'created_by_id' => $request->user()->id,
@@ -169,6 +174,7 @@ class ImportPurchaseController extends Controller
 
             $this->syncItems($import, $validated['items']);
             $this->syncCosts($import, $validated['costs'] ?? []);
+            $this->syncDerivedCosts($import);
 
             return $import;
         });
@@ -178,18 +184,18 @@ class ImportPurchaseController extends Controller
         return response()->json([
             'success' => true,
             'message' => 'Proses impor berhasil dibuat (draft).',
-            'data' => $import->load(['supplier', 'items.product.unit', 'costs']),
+            'data' => $import->load(['supplier', 'items.product.unit', 'costs', 'payments', 'notuls']),
         ], 201);
     }
 
     public function update($id, Request $request)
     {
-        if (!$this->isAdmin($request)) {
+        if (! $this->isAdmin($request)) {
             return $this->forbidden();
         }
 
         $import = ImportPurchase::find($id);
-        if (!$import) {
+        if (! $import) {
             return response()->json(['success' => false, 'message' => 'Proses impor tidak ditemukan.'], 404);
         }
         if (in_array($import->stage, ['finalized', 'cancelled'], true)) {
@@ -204,13 +210,15 @@ class ImportPurchaseController extends Controller
                 'store_id' => array_key_exists('store_id', $validated) ? $validated['store_id'] : $import->store_id,
                 'currency' => $validated['currency'] ?? $import->currency,
                 'exchange_rate' => $validated['exchange_rate'] ?? $import->exchange_rate,
+                'invoice_number' => array_key_exists('invoice_number', $validated) ? $validated['invoice_number'] : $import->invoice_number,
+                'purchase_date' => array_key_exists('purchase_date', $validated) ? $validated['purchase_date'] : $import->purchase_date,
                 'notes' => array_key_exists('notes', $validated) ? $validated['notes'] : $import->notes,
             ])->save();
 
             // Full-replace items hanya sebelum barang diterima-timbang ulang
             // (receiving) — replace setelah itu akan menghapus jumlah diterima.
             if (array_key_exists('items', $validated)) {
-                if (!in_array($import->stage, ['draft', 'payment', 'shipment', 'customs'], true)) {
+                if (! in_array($import->stage, ['draft', 'payment', 'shipment', 'customs'], true)) {
                     abort(response()->json([
                         'success' => false,
                         'message' => 'Item hanya dapat diganti sebelum tahap kedatangan (jumlah diterima sudah/proses diisi).',
@@ -224,6 +232,7 @@ class ImportPurchaseController extends Controller
                 $import->costs()->delete();
                 $this->syncCosts($import, $validated['costs']);
             }
+            $this->syncDerivedCosts($import);
         });
 
         $this->refreshTotals($import);
@@ -231,18 +240,18 @@ class ImportPurchaseController extends Controller
         return response()->json([
             'success' => true,
             'message' => 'Proses impor berhasil diperbarui.',
-            'data' => $import->load(['supplier', 'items.product.unit', 'costs']),
+            'data' => $import->load(['supplier', 'items.product.unit', 'costs', 'payments', 'notuls']),
         ]);
     }
 
     public function storeDocument($id, Request $request)
     {
-        if (!$this->isAdmin($request)) {
+        if (! $this->isAdmin($request)) {
             return $this->forbidden();
         }
 
         $import = ImportPurchase::find($id);
-        if (!$import) {
+        if (! $import) {
             return response()->json(['success' => false, 'message' => 'Proses impor tidak ditemukan.'], 404);
         }
         if (in_array($import->stage, ['finalized', 'cancelled'], true)) {
@@ -250,7 +259,7 @@ class ImportPurchaseController extends Controller
         }
 
         $request->validate([
-            'type' => 'required|in:' . implode(',', ImportHppService::DOCUMENT_TYPES),
+            'type' => 'required|in:'.implode(',', ImportHppService::DOCUMENT_TYPES),
             // Path hasil upload single-hop ke img service — prefix mencegah
             // path milik modul lain dipakai sebagai dokumen impor (anti-forgery,
             // pola ProcurementController pada image invoice).
@@ -279,12 +288,12 @@ class ImportPurchaseController extends Controller
 
     public function destroyDocument($id, $docId, Request $request)
     {
-        if (!$this->isAdmin($request)) {
+        if (! $this->isAdmin($request)) {
             return $this->forbidden();
         }
 
         $document = ImportDocument::where('import_purchase_id', $id)->find($docId);
-        if (!$document) {
+        if (! $document) {
             return response()->json(['success' => false, 'message' => 'Dokumen tidak ditemukan.'], 404);
         }
 
@@ -297,7 +306,7 @@ class ImportPurchaseController extends Controller
         try {
             $this->storage->delete($document->file_path);
         } catch (\Throwable $e) {
-            \Illuminate\Support\Facades\Log::error('Gagal hapus file dokumen impor di img service.', [
+            Log::error('Gagal hapus file dokumen impor di img service.', [
                 'path' => $document->file_path,
                 'message' => $e->getMessage(),
             ]);
@@ -308,16 +317,30 @@ class ImportPurchaseController extends Controller
 
     public function receive($id, Request $request)
     {
-        if (!$this->isAdmin($request)) {
+        if (! $this->isAdmin($request)) {
             return $this->forbidden();
         }
 
         $import = ImportPurchase::find($id);
-        if (!$import) {
+        if (! $import) {
             return response()->json(['success' => false, 'message' => 'Proses impor tidak ditemukan.'], 404);
         }
-        if (!in_array($import->stage, ['arrival', 'receiving'], true)) {
-            return response()->json(['success' => false, 'message' => 'Penerimaan hanya dapat diisi pada tahap kedatangan/penerimaan.'], 422);
+        // Realisasi nominal boleh diisi sejak draft — biaya bank/pajak bisa
+        // sudah dibayar sebelum invoice lengkap. Jumlah diterima baru
+        // relevan saat barang tiba. Tahap terminal tetap terkunci.
+        if (in_array($import->stage, ['finalized', 'cancelled'], true)) {
+            return response()->json(['success' => false, 'message' => 'Realisasi tidak dapat diisi pada proses yang sudah final/dibatalkan.'], 422);
+        }
+        if ($request->filled('items') && ! in_array($import->stage, ['arrival', 'receiving'], true)) {
+            return response()->json(['success' => false, 'message' => 'Jumlah diterima hanya dapat diisi pada tahap kedatangan/penerimaan.'], 422);
+        }
+
+        $notuls = $request->input('notuls');
+        if (is_array($notuls) && $notuls !== [] && ! in_array($import->stage, ['customs', 'arrival', 'receiving'], true)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Notul hanya dapat diisi pada tahap kepabeanan, kedatangan, atau penerimaan.',
+            ], 422);
         }
 
         $request->validate([
@@ -325,33 +348,124 @@ class ImportPurchaseController extends Controller
             'items.*.id' => 'required|integer|distinct',
             'items.*.quantity_received' => 'required|numeric|min:0',
             'costs' => 'nullable|array',
-            'costs.*.id' => 'required|integer|distinct',
+            // id null → baris biaya BARU (denda/biaya lain yang muncul belakangan).
+            'costs.*.id' => 'nullable|integer',
             'costs.*.amount_real' => 'nullable|numeric|min:0',
+            'costs.*.stage' => 'nullable|in:purchase,payment,shipment,customs,arrival',
+            'costs.*.name' => 'nullable|string|max:100',
+            'costs.*.category' => 'nullable|in:goods,bank,tax,logistics,other,discount',
+            'costs.*.tax_rate' => 'nullable|numeric|min:0|max:100',
+            'costs.*.is_foreign_currency' => 'nullable|boolean',
+            'costs.*.amount_foreign' => 'nullable|numeric|min:0',
+            'payments' => 'nullable|array',
+            'payments.*.id' => 'nullable|integer|distinct',
+            'payments.*.amount' => 'required|numeric|gt:0',
+            'payments.*.paid_at' => 'required|date',
+            'payments.*.note' => 'nullable|string',
+            'payments.*.proof_path' => ['nullable', 'string', 'max:500', 'starts_with:documents/ImportPurchase/'],
+            'payments.*.proof_original_name' => 'nullable|string|max:255',
+            'payments.*.proof_mime_type' => 'nullable|string|max:100',
+            'payments.*.proof_size_bytes' => 'nullable|integer|min:0',
+            'notuls' => 'nullable|array',
+            'notuls.*.id' => 'nullable|integer|distinct',
+            'notuls.*.notul_number' => 'nullable|string|max:100',
+            'notuls.*.notul_date' => 'required|date',
+            'notuls.*.pph_amount' => 'nullable|numeric|min:0',
+            'notuls.*.ppn_amount' => 'nullable|numeric|min:0',
+            'notuls.*.penalty_amount' => 'nullable|numeric|min:0',
+            'notuls.*.other_amount' => 'nullable|numeric|min:0',
+            'notuls.*.other_description' => 'nullable|string|max:100',
+            'notuls.*.note' => 'nullable|string',
+            'notuls.*.document_path' => ['nullable', 'string', 'max:500', 'starts_with:documents/ImportPurchase/'],
+            'notuls.*.document_original_name' => 'nullable|string|max:255',
+            'notuls.*.document_mime_type' => 'nullable|string|max:100',
+            'notuls.*.document_size_bytes' => 'nullable|integer|min:0',
         ]);
+
+        $paymentRows = $request->input('payments');
+        if (is_array($paymentRows) && $paymentRows !== []) {
+            // Tranche pertama = tanggal bayar paling awal, bukan urutan array.
+            $first = collect($paymentRows)->sortBy('paid_at')->first();
+            $existingProof = ! empty($first['id'])
+                ? $import->payments()->find($first['id'])?->proof_path
+                : null;
+            if (empty($first['proof_path']) && empty($existingProof)) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Bukti pembayaran tranche pertama wajib dilampirkan.',
+                ], 422);
+            }
+        }
+
+        $attachmentsBefore = $this->attachmentPaths($import);
 
         DB::transaction(function () use ($request, $import) {
             foreach ($request->input('items', []) as $row) {
                 $this->findOrFailOwned($import, 'items', $row['id'])
                     ->update(['quantity_received' => $row['quantity_received']]);
             }
+            $seenIds = [];
             foreach ($request->input('costs', []) as $row) {
-                $this->findOrFailOwned($import, 'costs', $row['id'])
-                    ->update(['amount_real' => $row['amount_real']]);
+                if (! empty($row['id'])) {
+                    $seenIds[] = (int) $row['id'];
+                    $cost = $this->findOrFailOwned($import, 'costs', $row['id']);
+                    if ($cost->source !== null) {
+                        abort(response()->json([
+                            'success' => false,
+                            'message' => 'Biaya pembayaran/notul dihitung otomatis dan tidak dapat diubah manual.',
+                        ], 422));
+                    }
+                    $cost->update(['amount_real' => $row['amount_real'] ?? null]);
+
+                    continue;
+                }
+                // Baris baru: minimal nama; stage/kategori di-default wajar.
+                if (empty($row['name'])) {
+                    abort(response()->json([
+                        'success' => false,
+                        'message' => 'Baris biaya baru wajib memiliki nama.',
+                    ], 422));
+                }
+                $import->costs()->create([
+                    'stage' => $row['stage'] ?? $import->stage,
+                    'name' => $row['name'],
+                    'category' => $row['category'] ?? 'other',
+                    'tax_rate' => $row['tax_rate'] ?? null,
+                    'is_foreign_currency' => $row['is_foreign_currency'] ?? false,
+                    'amount_foreign' => $row['amount_foreign'] ?? null,
+                    'amount_estimate' => 0,
+                    'amount_real' => $row['amount_real'] ?? null,
+                ]);
             }
+            if (count($seenIds) !== count(array_unique($seenIds))) {
+                abort(response()->json([
+                    'success' => false,
+                    'message' => 'Baris biaya yang sama dikirim lebih dari sekali.',
+                ], 422));
+            }
+
+            if ($request->has('payments')) {
+                $this->syncPayments($import, $request->input('payments') ?? []);
+            }
+            if ($request->has('notuls')) {
+                $this->syncNotuls($import, $request->input('notuls') ?? []);
+            }
+            $this->syncDerivedCosts($import);
         });
 
         $this->refreshTotals($import);
+        $this->deleteRemovedAttachments($attachmentsBefore, $this->attachmentPaths($import));
 
         return response()->json([
             'success' => true,
-            'message' => 'Data penerimaan & realisasi biaya tersimpan.',
-            'data' => $import->load(['items.product.unit', 'costs']),
+            'message' => 'Data penerimaan, pembayaran, dan realisasi biaya tersimpan.',
+            'data' => $import->load(['items.product.unit', 'costs', 'payments', 'notuls']),
         ]);
     }
 
     public function advance($id, Request $request)
     {
-        if (!$this->isAdmin($request)) {
+        if (! $this->isAdmin($request)) {
             return $this->forbidden();
         }
 
@@ -360,7 +474,7 @@ class ImportPurchaseController extends Controller
         ]);
 
         $import = ImportPurchase::with(['items', 'documents'])->find($id);
-        if (!$import) {
+        if (! $import) {
             return response()->json(['success' => false, 'message' => 'Proses impor tidak ditemukan.'], 404);
         }
 
@@ -394,7 +508,7 @@ class ImportPurchaseController extends Controller
         $this->refreshTotals($import);
 
         if ($skipped !== []) {
-            \Illuminate\Support\Facades\Log::info('Impor: advance bypass dokumen', [
+            Log::info('Impor: advance bypass dokumen', [
                 'user_id' => $request->user()->id,
                 'import_purchase_id' => $import->id,
                 'from_stage' => $from,
@@ -408,19 +522,19 @@ class ImportPurchaseController extends Controller
 
         return response()->json([
             'success' => true,
-            'message' => 'Tahap menjadi: ' . ImportHppService::STAGE_LABELS[$import->stage],
+            'message' => 'Tahap menjadi: '.ImportHppService::STAGE_LABELS[$import->stage],
             'data' => $import,
         ]);
     }
 
     public function finalize($id, Request $request)
     {
-        if (!$this->isAdmin($request)) {
+        if (! $this->isAdmin($request)) {
             return $this->forbidden();
         }
 
         $import = ImportPurchase::with(['items.product', 'costs'])->find($id);
-        if (!$import) {
+        if (! $import) {
             return response()->json(['success' => false, 'message' => 'Proses impor tidak ditemukan.'], 404);
         }
         if ($import->stage !== 'receiving') {
@@ -442,6 +556,8 @@ class ImportPurchaseController extends Controller
         }
 
         $computed = DB::transaction(function () use ($import) {
+            $this->syncDerivedCosts($import);
+            $import->load(['items', 'costs']);
             $computed = $this->computeFor($import);
 
             foreach ($import->items as $item) {
@@ -479,12 +595,12 @@ class ImportPurchaseController extends Controller
 
     public function cancel($id, Request $request)
     {
-        if (!$this->isAdmin($request)) {
+        if (! $this->isAdmin($request)) {
             return $this->forbidden();
         }
 
         $import = ImportPurchase::find($id);
-        if (!$import) {
+        if (! $import) {
             return response()->json(['success' => false, 'message' => 'Proses impor tidak ditemukan.'], 404);
         }
         if ($import->stage === 'finalized' || $import->stage === 'cancelled') {
@@ -505,12 +621,12 @@ class ImportPurchaseController extends Controller
      */
     public function destroy($id, Request $request)
     {
-        if (!$this->isAdmin($request)) {
+        if (! $this->isAdmin($request)) {
             return $this->forbidden();
         }
 
         $import = ImportPurchase::with('documents')->find($id);
-        if (!$import) {
+        if (! $import) {
             return response()->json(['success' => false, 'message' => 'Proses impor tidak ditemukan.'], 404);
         }
         if ($import->stage === 'finalized') {
@@ -520,7 +636,7 @@ class ImportPurchaseController extends Controller
             ], 422);
         }
 
-        $documents = $import->documents->all();
+        $attachments = $this->attachmentPaths($import);
 
         DB::transaction(function () use ($import) {
             $import->documents()->delete();
@@ -529,18 +645,7 @@ class ImportPurchaseController extends Controller
             $import->delete();
         });
 
-        // Best-effort hapus file fisik dokumen di img service; kegagalan
-        // tidak boleh menggagalkan request (record sudah terhapus).
-        foreach ($documents as $document) {
-            try {
-                $this->storage->delete($document->file_path);
-            } catch (\Throwable $e) {
-                \Illuminate\Support\Facades\Log::error('Gagal hapus file dokumen impor di img service.', [
-                    'path' => $document->file_path,
-                    'message' => $e->getMessage(),
-                ]);
-            }
-        }
+        $this->deleteAttachmentFiles($attachments);
 
         return response()->json(['success' => true, 'message' => 'Proses impor dihapus permanen.']);
     }
@@ -554,7 +659,7 @@ class ImportPurchaseController extends Controller
     private function findOrFailOwned(ImportPurchase $import, string $relation, int $id)
     {
         $model = $import->$relation()->find($id);
-        if (!$model) {
+        if (! $model) {
             abort(response()->json([
                 'success' => false,
                 'message' => "Data {$relation} #{$id} bukan bagian dari proses impor ini.",
@@ -569,12 +674,14 @@ class ImportPurchaseController extends Controller
         $required = $isUpdate ? 'sometimes' : 'required';
 
         return $request->validate([
-            'supplier_id' => $required . '|exists:suppliers,id',
+            'supplier_id' => $required.'|exists:suppliers,id',
             'store_id' => 'nullable|exists:stores,id',
             'currency' => 'sometimes|string|size:3',
-            'exchange_rate' => $required . '|numeric|gt:0',
+            'exchange_rate' => $required.'|numeric|gt:0',
+            'invoice_number' => 'nullable|string|max:100',
+            'purchase_date' => 'sometimes|date',
             'notes' => 'nullable|string',
-            'items' => $required . '|array|min:1',
+            'items' => $required.'|array|min:1',
             'items.*.product_id' => 'required|exists:products,id',
             'items.*.quantity' => 'required|numeric|gt:0',
             'items.*.unit_price_foreign' => 'required|numeric|min:0',
@@ -582,13 +689,160 @@ class ImportPurchaseController extends Controller
             'costs' => 'sometimes|array',
             'costs.*.stage' => 'required|in:purchase,payment,shipment,customs,arrival',
             'costs.*.name' => 'required|string|max:100',
-            'costs.*.category' => 'required|in:goods,bank,tax,logistics,other',
+            'costs.*.category' => 'required|in:goods,bank,tax,logistics,other,discount',
             'costs.*.tax_rate' => 'nullable|numeric|min:0|max:100',
             'costs.*.is_foreign_currency' => 'sometimes|boolean',
             'costs.*.amount_foreign' => 'nullable|numeric|min:0',
             'costs.*.amount_estimate' => 'required|numeric|min:0',
             'costs.*.amount_real' => 'sometimes|nullable|numeric|min:0',
         ]);
+    }
+
+    private function syncPayments(ImportPurchase $import, array $payments): void
+    {
+        $seenIds = [];
+        foreach ($payments as $row) {
+            $data = [
+                'amount' => $row['amount'],
+                'paid_at' => $row['paid_at'],
+                'note' => $row['note'] ?? null,
+            ];
+            foreach (['proof_path', 'proof_original_name', 'proof_mime_type', 'proof_size_bytes'] as $field) {
+                if (array_key_exists($field, $row)) {
+                    $data[$field] = $row[$field];
+                }
+            }
+
+            if (! empty($row['id'])) {
+                $payment = $this->findOrFailOwned($import, 'payments', (int) $row['id']);
+                $seenIds[] = $payment->id;
+                $payment->update($data);
+
+                continue;
+            }
+
+            $payment = $import->payments()->create($data);
+            $seenIds[] = $payment->id;
+        }
+
+        if ($seenIds === []) {
+            $import->payments()->delete();
+        } else {
+            $import->payments()->whereNotIn('id', $seenIds)->delete();
+        }
+    }
+
+    private function syncNotuls(ImportPurchase $import, array $notuls): void
+    {
+        $seenIds = [];
+        foreach ($notuls as $row) {
+            $data = [
+                'notul_number' => $row['notul_number'] ?? null,
+                'notul_date' => $row['notul_date'],
+                'pph_amount' => $row['pph_amount'] ?? 0,
+                'ppn_amount' => $row['ppn_amount'] ?? 0,
+                'penalty_amount' => $row['penalty_amount'] ?? 0,
+                'other_amount' => $row['other_amount'] ?? 0,
+                'other_description' => $row['other_description'] ?? null,
+                'note' => $row['note'] ?? null,
+            ];
+            foreach (['document_path', 'document_original_name', 'document_mime_type', 'document_size_bytes'] as $field) {
+                if (array_key_exists($field, $row)) {
+                    $data[$field] = $row[$field];
+                }
+            }
+
+            if (! empty($row['id'])) {
+                $notul = $this->findOrFailOwned($import, 'notuls', (int) $row['id']);
+                $seenIds[] = $notul->id;
+                $notul->update($data);
+
+                continue;
+            }
+
+            $notul = $import->notuls()->create($data);
+            $seenIds[] = $notul->id;
+        }
+
+        if ($seenIds === []) {
+            $import->notuls()->delete();
+        } else {
+            $import->notuls()->whereNotIn('id', $seenIds)->delete();
+        }
+    }
+
+    /**
+     * Baris biaya turunan dari pembayaran & notul. Row ini yang membuat
+     * total real = Σ pembayaran + biaya non-bank lain, tanpa double count
+     * Transfer Bank/Bank/Discounts manual.
+     */
+    private function syncDerivedCosts(ImportPurchase $import): void
+    {
+        $import->costs()->whereIn('source', ['payment', 'notul'])->delete();
+
+        $exchangeRate = (float) $import->exchange_rate;
+        $goodsTotal = $import->items()->get()->sum(
+            fn ($item) => (float) $item->quantity * (float) $item->unit_price_foreign * $exchangeRate
+        );
+
+        $payments = $import->payments()->get();
+        if ($payments->isNotEmpty()) {
+            $import->costs()->create([
+                'stage' => 'payment',
+                'name' => 'Pembayaran Bank (net)',
+                'category' => 'bank',
+                'source' => 'payment',
+                'amount_estimate' => 0,
+                'amount_real' => round($payments->sum('amount') - $goodsTotal, 2),
+            ]);
+        }
+
+        $notuls = $import->notuls()->get()->sortByDesc('id')->sortByDesc('notul_date');
+        if ($notuls->isNotEmpty()) {
+            $latest = $notuls->first();
+            $import->costs()->createMany([
+                [
+                    'stage' => 'customs',
+                    'name' => 'PPh Impor (Notul)',
+                    'category' => 'tax',
+                    'source' => 'notul',
+                    'amount_estimate' => 0,
+                    'amount_real' => (float) $latest->pph_amount,
+                ],
+                [
+                    'stage' => 'customs',
+                    'name' => 'PPN Impor (Notul)',
+                    'category' => 'tax',
+                    'source' => 'notul',
+                    'amount_estimate' => 0,
+                    'amount_real' => (float) $latest->ppn_amount,
+                ],
+            ]);
+
+            $penalty = $notuls->sum('penalty_amount');
+            if ($penalty > 0) {
+                $import->costs()->create([
+                    'stage' => 'customs',
+                    'name' => 'Denda Administrasi (Notul)',
+                    'category' => 'other',
+                    'source' => 'notul',
+                    'amount_estimate' => 0,
+                    'amount_real' => (float) $penalty,
+                ]);
+            }
+
+            $other = $notuls->sum('other_amount');
+            if ($other > 0) {
+                $import->costs()->create([
+                    'stage' => 'customs',
+                    'name' => 'Biaya Lain (Notul)',
+                    'category' => 'other',
+                    'source' => 'notul',
+                    'amount_estimate' => 0,
+                    'amount_real' => (float) $other,
+                ]);
+            }
+        }
     }
 
     private function syncItems(ImportPurchase $import, array $items): void
@@ -617,6 +871,63 @@ class ImportPurchaseController extends Controller
                 'amount_real' => $cost['amount_real'] ?? null,
             ]);
         }
+    }
+
+    /**
+     * Semua path file fisik yang dimiliki proses impor (dokumen, bukti bayar,
+     * dokumen notul) — untuk pembersihan saat baris/proses dihapus.
+     *
+     * @return list<string>
+     */
+    private function attachmentPaths(ImportPurchase $import): array
+    {
+        $import->load(['documents', 'payments', 'notuls']);
+
+        return collect()
+            ->merge($import->documents->pluck('file_path'))
+            ->merge($import->payments->pluck('proof_path'))
+            ->merge($import->notuls->pluck('document_path'))
+            ->filter(fn ($path) => is_string($path) && $path !== '')
+            ->unique()
+            ->values()
+            ->all();
+    }
+
+    /**
+     * @param  list<string>  $before
+     * @param  list<string>  $after
+     */
+    private function deleteRemovedAttachments(array $before, array $after): void
+    {
+        $this->deleteAttachmentFiles(array_values(array_diff($before, $after)));
+    }
+
+    /**
+     * Best-effort hapus file fisik di img service; kegagalan tidak boleh
+     * menggagalkan request (record DB sudah berubah).
+     *
+     * @param  list<string>  $paths
+     */
+    private function deleteAttachmentFiles(array $paths): void
+    {
+        if ($paths === []) {
+            return;
+        }
+
+        // Bersihkan setelah response agar img service yang lambat/down tidak
+        // menahan request simpan/hapus.
+        defer(function () use ($paths) {
+            foreach ($paths as $path) {
+                try {
+                    $this->storage->delete($path);
+                } catch (\Throwable $e) {
+                    Log::error('Gagal hapus file lampiran impor di img service.', [
+                        'path' => $path,
+                        'message' => $e->getMessage(),
+                    ]);
+                }
+            }
+        });
     }
 
     /**

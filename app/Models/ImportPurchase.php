@@ -2,18 +2,20 @@
 
 namespace App\Models;
 
-use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Model;
 
 class ImportPurchase extends Model
 {
     protected $connection = 'mysql';
+
     use HasFactory;
 
     protected $guarded = [];
 
     protected $casts = [
         'exchange_rate' => 'float',
+        'purchase_date' => 'date:Y-m-d',
         'total_estimate' => 'float',
         'total_real' => 'float',
     ];
@@ -41,6 +43,16 @@ class ImportPurchase extends Model
     public function costs()
     {
         return $this->hasMany(ImportCost::class);
+    }
+
+    public function payments()
+    {
+        return $this->hasMany(ImportPayment::class)->orderBy('paid_at')->orderBy('id');
+    }
+
+    public function notuls()
+    {
+        return $this->hasMany(ImportNotul::class)->orderBy('notul_date')->orderBy('id');
     }
 
     public function documents()

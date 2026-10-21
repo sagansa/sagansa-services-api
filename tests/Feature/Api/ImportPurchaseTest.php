@@ -6,6 +6,7 @@ use App\Models\ImportDocument;
 use App\Models\ImportPurchase;
 use App\Models\Product;
 use App\Models\Supplier;
+use App\Models\Unit;
 use App\Models\User;
 use App\Services\ImportHppService;
 use Laravel\Sanctum\Sanctum;
@@ -18,6 +19,7 @@ class ImportPurchaseTest extends TestCase
 
     /** @var array<int, array{hpp: mixed, hpp_updated_at: mixed}> kondisi hpp produk sebelum test (untuk dipulihkan). */
     private array $productHppBackup = [];
+
     /**
      * Fixture ringan mengikuti pola sheet HPP METE: 1 item, kurs 17.545,
      * transfer bank valuta + PPh 2,5% auto.
@@ -28,6 +30,8 @@ class ImportPurchaseTest extends TestCase
             'supplier_id' => $supplier->id,
             'currency' => 'USD',
             'exchange_rate' => 17545,
+            'invoice_number' => 'INV-METE-001',
+            'purchase_date' => '2026-10-18',
             'items' => [
                 [
                     'product_id' => $product->id,
@@ -92,7 +96,7 @@ class ImportPurchaseTest extends TestCase
      */
     private function ensureFixtures(): array
     {
-        $unit = \App\Models\Unit::firstOrCreate(['name' => 'Kilogram'], ['unit' => 'kg']);
+        $unit = Unit::firstOrCreate(['name' => 'Kilogram'], ['unit' => 'kg']);
 
         $materialGroupId = \DB::table('material_groups')->where('name', 'Bahan Baku')->value('id')
             ?: \DB::table('material_groups')->insertGetId(['name' => 'Bahan Baku', 'status' => 1]);
@@ -129,7 +133,7 @@ class ImportPurchaseTest extends TestCase
         ImportDocument::create([
             'import_purchase_id' => $import->id,
             'type' => $type,
-            'file_path' => 'documents/ImportPurchase/' . uniqid() . '.webp',
+            'file_path' => 'documents/ImportPurchase/'.uniqid().'.webp',
             'uploaded_by' => 1,
         ]);
     }
@@ -154,6 +158,8 @@ class ImportPurchaseTest extends TestCase
         $import = $this->makeImport();
 
         $this->assertSame('draft', $import->stage);
+        $this->assertSame('INV-METE-001', $import->invoice_number);
+        $this->assertSame('2026-10-18', $import->purchase_date->toDateString());
         $this->assertSame(1, $import->items()->count());
         $this->assertSame(2, $import->costs()->count());
 
@@ -218,6 +224,229 @@ class ImportPurchaseTest extends TestCase
             'Minimal 1 item',
             $res->json('data.blockers.0.message'),
         );
+    }
+
+    public function test_receive_supports_staged_realization_and_new_costs(): void
+    {
+        $import = $this->makeImport();
+
+        // Realisasi biaya saja sudah boleh diisi sejak draft (draft → payment
+        // tidak lagi menjadi gerbang input realisasi).
+        $bank = $import->costs->firstWhere(fn ($c) => $c->name === 'Transfer Bank');
+        $this->postJson("/import-purchases/{$import->id}/receive", [
+            'costs' => [
+                ['id' => $bank->id, 'amount_real' => 438625],
+                // Baris biaya BARU (notul/denda yang muncul belakangan).
+                [
+                    'name' => 'Denda Penyimpanan',
+                    'stage' => 'customs',
+                    'category' => 'other',
+                    'amount_real' => 1500000,
+                ],
+            ],
+        ])->assertOk();
+
+        // draft → payment.
+        $this->postJson("/import-purchases/{$import->id}/advance")
+            ->assertOk()
+            ->assertJsonPath('data.stage', 'payment');
+
+        $this->assertSame(438625.0, (float) $bank->fresh()->amount_real);
+        $this->assertDatabaseHas('import_costs', [
+            'import_purchase_id' => $import->id,
+            'name' => 'Denda Penyimpanan',
+            'amount_real' => 1500000,
+            'amount_estimate' => 0,
+        ]);
+
+        // Baris baru tanpa nama ditolak.
+        $this->postJson("/import-purchases/{$import->id}/receive", [
+            'costs' => [['amount_real' => 5000]],
+        ])->assertStatus(422);
+
+        // Jumlah diterima belum boleh diisi di tahap payment.
+        $item = $import->items->first();
+        $this->postJson("/import-purchases/{$import->id}/receive", [
+            'items' => [['id' => $item->id, 'quantity_received' => 100]],
+        ])->assertStatus(422);
+    }
+
+    public function test_receive_with_payment_tranches_uses_single_bank_total(): void
+    {
+        $import = $this->makeImport();
+
+        // Tranche pertama wajib bukti; tranche kedua opsional.
+        $this->postJson("/import-purchases/{$import->id}/receive", [
+            'payments' => [[
+                'amount' => 280000000,
+                'paid_at' => '2026-10-18',
+            ]],
+        ])->assertStatus(422)
+            ->assertJsonPath('success', false);
+
+        // Urutan array bukan acuan: tanggal paling awal tetap wajib bukti.
+        $this->postJson("/import-purchases/{$import->id}/receive", [
+            'payments' => [
+                [
+                    'amount' => 10000000,
+                    'paid_at' => '2026-10-20',
+                    'proof_path' => 'documents/ImportPurchase/bayar-2.webp',
+                ],
+                [
+                    'amount' => 280000000,
+                    'paid_at' => '2026-10-18',
+                ],
+            ],
+        ])->assertStatus(422)
+            ->assertJsonPath('success', false);
+
+        $this->postJson("/import-purchases/{$import->id}/receive", [
+            'payments' => [
+                [
+                    'amount' => 280000000,
+                    'paid_at' => '2026-10-18',
+                    'proof_path' => 'documents/ImportPurchase/bayar-1.webp',
+                ],
+                [
+                    'amount' => 10000000,
+                    'paid_at' => '2026-10-20',
+                ],
+            ],
+        ])->assertOk();
+
+        $this->assertSame(2, $import->payments()->count());
+
+        // Net pembayaran = 290.000.000 − nilai barang 266.859.450.
+        $derived = $import->costs()->where('source', 'payment')->firstOrFail();
+        $this->assertSame('bank', $derived->category);
+        $this->assertEqualsWithDelta(23140550, (float) $derived->amount_real, 0.01);
+
+        // Total real = Σ pembayaran + PPh (6.671.486,25). Transfer Bank
+        // manual tidak dihitung dua kali.
+        $import->refresh();
+        $this->assertEqualsWithDelta(296671486.25, (float) $import->total_real, 1.0);
+
+        // Hapus pembayaran → baris derived hilang & real kembali ke input manual.
+        $this->postJson("/import-purchases/{$import->id}/receive", [
+            'payments' => [],
+        ])->assertOk();
+
+        $this->assertSame(0, $import->payments()->count());
+        $this->assertSame(0, $import->costs()->where('source', 'payment')->count());
+        $this->assertEqualsWithDelta(273969561.25, (float) $import->fresh()->total_real, 1.0);
+    }
+
+    public function test_notul_replaces_tax_and_aggregates_penalties(): void
+    {
+        $import = $this->makeImport();
+        $import->update(['stage' => 'customs']);
+        $tax = $import->costs()->where('category', 'tax')->firstOrFail();
+
+        $this->postJson("/import-purchases/{$import->id}/receive", [
+            'costs' => [
+                // Real manual pajak lama harus diabaikan saat notul ada.
+                ['id' => $tax->id, 'amount_real' => 999],
+            ],
+            'notuls' => [
+                [
+                    'notul_number' => 'NOTUL-001',
+                    'notul_date' => '2026-10-19',
+                    'pph_amount' => 12000000,
+                    'ppn_amount' => 30000000,
+                    'penalty_amount' => 1000000,
+                    'other_amount' => 500000,
+                ],
+                [
+                    'notul_number' => 'NOTUL-002',
+                    'notul_date' => '2026-10-21',
+                    'pph_amount' => 13000000,
+                    'ppn_amount' => 31000000,
+                    'penalty_amount' => 2000000,
+                    'other_amount' => 200000,
+                ],
+            ],
+        ])->assertOk();
+
+        $this->assertSame(2, $import->notuls()->count());
+
+        // PPh/PPN memakai notul terbaru; denda & biaya lain dijumlahkan.
+        $pph = $import->costs()->where('name', 'PPh Impor (Notul)')->firstOrFail();
+        $ppn = $import->costs()->where('name', 'PPN Impor (Notul)')->firstOrFail();
+        $penalty = $import->costs()->where('name', 'Denda Administrasi (Notul)')->firstOrFail();
+        $other = $import->costs()->where('name', 'Biaya Lain (Notul)')->firstOrFail();
+
+        $this->assertEqualsWithDelta(13000000, (float) $pph->amount_real, 0.01);
+        $this->assertEqualsWithDelta(31000000, (float) $ppn->amount_real, 0.01);
+        $this->assertEqualsWithDelta(3000000, (float) $penalty->amount_real, 0.01);
+        $this->assertEqualsWithDelta(700000, (float) $other->amount_real, 0.01);
+
+        // 266.859.450 + 438.625 + 13jt + 31jt + 3jt + 700rb.
+        $this->assertEqualsWithDelta(314998075, (float) $import->fresh()->total_real, 1.0);
+    }
+
+    public function test_notul_is_rejected_before_customs_stage(): void
+    {
+        $import = $this->makeImport();
+
+        $this->postJson("/import-purchases/{$import->id}/receive", [
+            'notuls' => [[
+                'notul_date' => '2026-10-21',
+                'pph_amount' => 1000,
+            ]],
+        ])->assertStatus(422)
+            ->assertJsonPath('success', false);
+    }
+
+    public function test_payment_proof_and_notul_document_paths_must_use_import_prefix(): void
+    {
+        $import = $this->makeImport();
+
+        $this->postJson("/import-purchases/{$import->id}/receive", [
+            'payments' => [[
+                'amount' => 1000,
+                'paid_at' => '2026-10-18',
+                'proof_path' => 'images/Other/bukti.webp',
+            ]],
+        ])->assertStatus(422)
+            ->assertJsonValidationErrors('payments.0.proof_path');
+
+        $import->update(['stage' => 'customs']);
+
+        $this->postJson("/import-purchases/{$import->id}/receive", [
+            'notuls' => [[
+                'notul_date' => '2026-10-21',
+                'document_path' => 'documents/Other/notul.webp',
+            ]],
+        ])->assertStatus(422)
+            ->assertJsonValidationErrors('notuls.0.document_path');
+    }
+
+    public function test_manual_discount_reduces_total(): void
+    {
+        $import = $this->makeImport();
+        $bank = $import->costs->firstWhere(fn ($c) => $c->name === 'Transfer Bank');
+
+        $this->postJson("/import-purchases/{$import->id}/receive", [
+            'costs' => [
+                ['id' => $bank->id, 'amount_real' => 438625],
+                [
+                    'name' => 'Diskon Supplier',
+                    'stage' => 'payment',
+                    'category' => 'discount',
+                    'amount_real' => 10000000,
+                ],
+            ],
+        ])->assertOk();
+
+        $this->assertSame(1, $import->costs()->where('category', 'discount')->count());
+
+        // HPP membaca diskon sebagai pengurang.
+        $hpp = $this->getJson("/import-purchases/{$import->id}")->assertOk()->json('hpp');
+        $row = collect($hpp['costs'])->firstWhere('category', 'discount');
+        $this->assertEqualsWithDelta(-10000000, (float) $row['real'], 0.01);
+
+        // 266.859.450 + 438.625 − 10jt + PPh 6.671.486,25.
+        $this->assertEqualsWithDelta(263969561.25, (float) $import->fresh()->total_real, 1.0);
     }
 
     public function test_show_includes_hpp_and_checklist(): void

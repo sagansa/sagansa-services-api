@@ -264,48 +264,24 @@ class ImportPurchaseTest extends TestCase
             'costs' => [['amount_real' => 5000]],
         ])->assertStatus(422);
 
-        // Jumlah diterima belum boleh diisi di tahap payment.
+        // Jumlah diterima boleh diisi sejak tahap payment (bypass alur).
         $item = $import->items->first();
         $this->postJson("/import-purchases/{$import->id}/receive", [
             'items' => [['id' => $item->id, 'quantity_received' => 100]],
-        ])->assertStatus(422);
+        ])->assertOk();
+        $this->assertSame(100.0, (float) $item->fresh()->quantity_received);
     }
 
     public function test_receive_with_payment_tranches_uses_single_bank_total(): void
     {
         $import = $this->makeImport();
 
-        // Tranche pertama wajib bukti; tranche kedua opsional.
-        $this->postJson("/import-purchases/{$import->id}/receive", [
-            'payments' => [[
-                'amount' => 280000000,
-                'paid_at' => '2026-10-18',
-            ]],
-        ])->assertStatus(422)
-            ->assertJsonPath('success', false);
-
-        // Urutan array bukan acuan: tanggal paling awal tetap wajib bukti.
-        $this->postJson("/import-purchases/{$import->id}/receive", [
-            'payments' => [
-                [
-                    'amount' => 10000000,
-                    'paid_at' => '2026-10-20',
-                    'proof_path' => 'documents/ImportPurchase/bayar-2.webp',
-                ],
-                [
-                    'amount' => 280000000,
-                    'paid_at' => '2026-10-18',
-                ],
-            ],
-        ])->assertStatus(422)
-            ->assertJsonPath('success', false);
-
+        // Bukti pembayaran opsional: tranche tanpa bukti tetap tersimpan.
         $this->postJson("/import-purchases/{$import->id}/receive", [
             'payments' => [
                 [
                     'amount' => 280000000,
                     'paid_at' => '2026-10-18',
-                    'proof_path' => 'documents/ImportPurchase/bayar-1.webp',
                 ],
                 [
                     'amount' => 10000000,
@@ -384,7 +360,7 @@ class ImportPurchaseTest extends TestCase
         $this->assertEqualsWithDelta(314998075, (float) $import->fresh()->total_real, 1.0);
     }
 
-    public function test_notul_is_rejected_before_customs_stage(): void
+    public function test_notul_can_be_entered_before_customs_stage(): void
     {
         $import = $this->makeImport();
 
@@ -393,8 +369,9 @@ class ImportPurchaseTest extends TestCase
                 'notul_date' => '2026-10-21',
                 'pph_amount' => 1000,
             ]],
-        ])->assertStatus(422)
-            ->assertJsonPath('success', false);
+        ])->assertOk();
+
+        $this->assertSame(1, $import->notuls()->count());
     }
 
     public function test_payment_proof_and_notul_document_paths_must_use_import_prefix(): void

@@ -325,22 +325,11 @@ class ImportPurchaseController extends Controller
         if (! $import) {
             return response()->json(['success' => false, 'message' => 'Proses impor tidak ditemukan.'], 404);
         }
-        // Realisasi nominal boleh diisi sejak draft — biaya bank/pajak bisa
-        // sudah dibayar sebelum invoice lengkap. Jumlah diterima baru
-        // relevan saat barang tiba. Tahap terminal tetap terkunci.
+        // Realisasi boleh diisi pada semua tahap non-terminal (bypass alur):
+        // biaya, jumlah diterima, pembayaran, dan notul tidak lagi menunggu
+        // tahap tertentu. Final/cancelled tetap terkunci.
         if (in_array($import->stage, ['finalized', 'cancelled'], true)) {
             return response()->json(['success' => false, 'message' => 'Realisasi tidak dapat diisi pada proses yang sudah final/dibatalkan.'], 422);
-        }
-        if ($request->filled('items') && ! in_array($import->stage, ['arrival', 'receiving'], true)) {
-            return response()->json(['success' => false, 'message' => 'Jumlah diterima hanya dapat diisi pada tahap kedatangan/penerimaan.'], 422);
-        }
-
-        $notuls = $request->input('notuls');
-        if (is_array($notuls) && $notuls !== [] && ! in_array($import->stage, ['customs', 'arrival', 'receiving'], true)) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Notul hanya dapat diisi pada tahap kepabeanan, kedatangan, atau penerimaan.',
-            ], 422);
         }
 
         $request->validate([
@@ -381,21 +370,6 @@ class ImportPurchaseController extends Controller
             'notuls.*.document_mime_type' => 'nullable|string|max:100',
             'notuls.*.document_size_bytes' => 'nullable|integer|min:0',
         ]);
-
-        $paymentRows = $request->input('payments');
-        if (is_array($paymentRows) && $paymentRows !== []) {
-            // Tranche pertama = tanggal bayar paling awal, bukan urutan array.
-            $first = collect($paymentRows)->sortBy('paid_at')->first();
-            $existingProof = ! empty($first['id'])
-                ? $import->payments()->find($first['id'])?->proof_path
-                : null;
-            if (empty($first['proof_path']) && empty($existingProof)) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Bukti pembayaran tranche pertama wajib dilampirkan.',
-                ], 422);
-            }
-        }
 
         $attachmentsBefore = $this->attachmentPaths($import);
 

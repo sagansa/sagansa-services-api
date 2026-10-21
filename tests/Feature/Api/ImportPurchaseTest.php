@@ -184,6 +184,42 @@ class ImportPurchaseTest extends TestCase
             ->assertJsonPath('data.stage', 'shipment');
     }
 
+    public function test_advance_bypass_documents_clears_document_gate(): void
+    {
+        $import = $this->makeImport();
+
+        // draft → payment tanpa dokumen.
+        $this->postJson("/import-purchases/{$import->id}/advance")
+            ->assertOk()
+            ->assertJsonPath('data.stage', 'payment');
+
+        // payment → shipment dengan bypass: gerbang dokumen dilewati.
+        $this->postJson("/import-purchases/{$import->id}/advance", [
+            'bypass_documents' => true,
+        ])
+            ->assertOk()
+            ->assertJsonPath('data.stage', 'shipment');
+
+        // Bypass tak berlaku untuk syarat data: import tanpa item tetap
+        // tertahan di draft meski bypass dikirim.
+        $empty = ImportPurchase::create([
+            'supplier_id' => $import->supplier_id,
+            'currency' => 'USD',
+            'exchange_rate' => 17545,
+            'stage' => 'draft',
+            'created_by_id' => $import->created_by_id,
+        ]);
+        $this->createdImportIds[] = $empty->id;
+        $res = $this->postJson("/import-purchases/{$empty->id}/advance", [
+            'bypass_documents' => true,
+        ]);
+        $res->assertStatus(422);
+        $this->assertStringContainsString(
+            'Minimal 1 item',
+            $res->json('data.blockers.0.message'),
+        );
+    }
+
     public function test_show_includes_hpp_and_checklist(): void
     {
         $import = $this->makeImport();

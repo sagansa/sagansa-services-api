@@ -228,6 +228,39 @@ class ImportHppServiceTest extends TestCase
     }
 
     #[Test]
+    public function missing_documents_lists_required_not_uploaded(): void
+    {
+        $this->assertSame(
+            ['invoice', 'payment_proof'],
+            $this->service->missingDocuments('payment', [])
+        );
+        $this->assertSame([], $this->service->missingDocuments('payment', ['invoice', 'payment_proof']));
+        $this->assertSame([], $this->service->missingDocuments('arrival', []));
+    }
+
+    #[Test]
+    public function bypass_documents_skips_only_document_blockers(): void
+    {
+        // Payment tanpa dokumen + bypass → bebas blocker.
+        $this->assertSame(
+            [],
+            $this->service->blockersForAdvance('payment', [], [], self::KURS, true)
+        );
+
+        // Data draft tetap memblokir meski bypass (item kosong + kurs 0).
+        $this->assertCount(
+            2,
+            $this->service->blockersForAdvance('draft', [], [], 0.0, true)
+        );
+
+        // State terminal tetap memblokir meski bypass.
+        $this->assertNotSame(
+            [],
+            $this->service->blockersForAdvance('finalized', [], [], self::KURS, true)
+        );
+    }
+
+    #[Test]
     public function finalize_blockers_require_received_quantity(): void
     {
         $this->assertCount(1, $this->service->blockersForFinalize([

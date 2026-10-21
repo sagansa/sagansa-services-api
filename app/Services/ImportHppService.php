@@ -248,10 +248,29 @@ class ImportHppService
     }
 
     /**
+     * Dokumen wajib tahap ini yang belum ter-upload (kode tipe).
+     *
+     * @param  array<int, string>  $uploadedDocumentTypes
+     * @return list<string>
+     */
+    public function missingDocuments(string $stage, array $uploadedDocumentTypes): array
+    {
+        $missing = [];
+        foreach (self::REQUIRED_DOCUMENTS[$stage] ?? [] as $type) {
+            if (!in_array($type, $uploadedDocumentTypes, true)) {
+                $missing[] = $type;
+            }
+        }
+
+        return $missing;
+    }
+
+    /**
      * Halangan untuk advance dari tahap saat ini.
      *
      * @param  array<int, string>  $uploadedDocumentTypes  tipe dokumen yang sudah ada (unik)
      * @param  array<int, array{quantity: float, quantity_received: float|null}>  $items
+     * @param  bool  $bypassDocuments  lewati gerbang dokumen (syarat data/state tetap)
      * @return list<array{kind: string, message: string}>
      */
     public function blockersForAdvance(
@@ -259,6 +278,7 @@ class ImportHppService
         array $uploadedDocumentTypes,
         array $items,
         float $exchangeRate,
+        bool $bypassDocuments = false,
     ): array {
         $blockers = [];
 
@@ -282,8 +302,8 @@ class ImportHppService
             }
         }
 
-        foreach (self::REQUIRED_DOCUMENTS[$stage] ?? [] as $type) {
-            if (!in_array($type, $uploadedDocumentTypes, true)) {
+        if (!$bypassDocuments) {
+            foreach ($this->missingDocuments($stage, $uploadedDocumentTypes) as $type) {
                 $blockers[] = [
                     'kind' => 'document',
                     'message' => 'Dokumen wajib belum diupload: ' . (self::DOCUMENT_LABELS[$type] ?? $type),

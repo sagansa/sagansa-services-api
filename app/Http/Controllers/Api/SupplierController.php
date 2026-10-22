@@ -127,9 +127,7 @@ class SupplierController extends Controller
         $data = $request->except(['image', 'status', 'user_id']);
         $data = $this->normalizeOrigin($data, $isForeign);
 
-        // Nama disimpan apa adanya — jangan paksa capital case; input
-        // uppercase seperti "PT SUMBER MAKMUR" harus tetap uppercase.
-        $data['name'] = trim((string) $request->name);
+        $data['name'] = $this->normalizeSupplierName((string) $request->name);
         $data['status'] = 1; // Default: belum diperiksa
         $data['user_id'] = $request->user()->id;
 
@@ -218,9 +216,8 @@ class SupplierController extends Controller
             ]);
         }
 
-        // Nama tetap seperti yang diketik (uppercase tidak diubah).
         if ($request->has('name')) {
-            $data['name'] = trim((string) $request->name);
+            $data['name'] = $this->normalizeSupplierName((string) $request->name);
         }
 
         // Only admin or super_admin can update status
@@ -349,6 +346,29 @@ class SupplierController extends Controller
         }
 
         return $data;
+    }
+
+    /**
+     * Title-case supplier names while keeping legal-form acronyms uppercase.
+     */
+    private function normalizeSupplierName(string $name): string
+    {
+        $acronyms = [
+            'PT', 'CV', 'UD', 'PD', 'TBK', 'PERSERO', 'PERUM', 'BUMN', 'BUMD',
+            'KUD', 'NV', 'BV', 'LTD', 'INC', 'LLC', 'CORP', 'GMBH', 'SDN',
+            'BHD', 'JSC', 'PLC', 'PTE',
+        ];
+
+        return preg_replace_callback('/[\p{L}\p{M}]+/u', function (array $match) use ($acronyms) {
+            $word = $match[0];
+            $upper = mb_strtoupper($word, 'UTF-8');
+
+            if (in_array($upper, $acronyms, true)) {
+                return $upper;
+            }
+
+            return mb_convert_case(mb_strtolower($word, 'UTF-8'), MB_CASE_TITLE, 'UTF-8');
+        }, trim($name));
     }
 
     /**

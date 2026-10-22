@@ -357,7 +357,7 @@ class SupplierController extends Controller
             'PT', 'CV', 'UD', 'PD', 'TBK', 'PERSERO', 'PERUM', 'BUMN', 'BUMD',
             'KUD', 'NV', 'BV', 'LTD', 'INC', 'LLC', 'CORP', 'GMBH', 'SDN',
             'BHD', 'JSC', 'PLC', 'PTE', 'SPBU', 'NS', 'JNE', 'POS', 'TIKI', 'DHL', 
-            'J&T', 'SICEPAT', 'NINJA', 'UPS', 'FEDEX', 'EMS',
+            'J&T', 'UPS', 'FEDEX', 'EMS', 'RT', 'RW',
         ];
 
         return preg_replace_callback('/[\p{L}\p{M}]+/u', function (array $match) use ($acronyms) {

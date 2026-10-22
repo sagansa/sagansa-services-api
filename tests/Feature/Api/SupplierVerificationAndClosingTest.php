@@ -113,6 +113,35 @@ class SupplierVerificationAndClosingTest extends TestCase
         $this->assertNotEquals(403, $res->getStatusCode());
     }
 
+    public function test_supplier_name_keeps_uppercase_as_typed(): void
+    {
+        Sanctum::actingAs($this->userWithRole('admin'));
+
+        $res = $this->postJson('/suppliers', [
+            'name' => 'PT SUMBER MAKMUR',
+            'address' => 'Jl. Test Uppercase',
+            'country_code' => 'US',
+            'city_name' => 'New York',
+            'currency' => 'USD',
+        ]);
+
+        $res->assertCreated();
+        $this->assertSame('PT SUMBER MAKMUR', $res->json('data.name'));
+    }
+
+    public function test_supplier_update_keeps_uppercase_as_typed(): void
+    {
+        Sanctum::actingAs($this->userWithRole('admin'));
+        $supplier = Supplier::factory()->create(['name' => 'Nama Lama']);
+
+        $res = $this->postJson("/suppliers/{$supplier->id}", [
+            'name' => 'PT SUMBER MAKMUR',
+        ]);
+
+        $res->assertOk();
+        $this->assertSame('PT SUMBER MAKMUR', $supplier->fresh()->name);
+    }
+
     // ── A2: Supplier update — staff image-only ────────────────────────────
 
     public function test_staff_can_only_update_image(): void

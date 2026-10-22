@@ -195,7 +195,17 @@ class ImportPurchaseController extends Controller
 
                 return $product;
             })
-            ->sortBy('product_name', SORT_NATURAL | SORT_FLAG_CASE)
+            // Dashboard trend mengikuti pembelian terbaru, bukan alfabet:
+            // produk yang baru dibeli muncul lebih dulu.
+            ->sort(function (array $a, array $b) {
+                $aLast = $a['points'][array_key_last($a['points'])];
+                $bLast = $b['points'][array_key_last($b['points'])];
+                $byDate = strcmp((string) ($bLast['date'] ?? ''), (string) ($aLast['date'] ?? ''));
+
+                return $byDate !== 0
+                    ? $byDate
+                    : ((int) ($bLast['import_id'] ?? 0) <=> (int) ($aLast['import_id'] ?? 0));
+            })
             ->values()
             ->all();
 

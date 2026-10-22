@@ -126,9 +126,10 @@ class SupplierController extends Controller
 
         $data = $request->except(['image', 'status', 'user_id']);
         $data = $this->normalizeOrigin($data, $isForeign);
-        
-        // Capital case formatting for name
-        $data['name'] = ucwords(strtolower($request->name));
+
+        // Nama disimpan apa adanya — jangan paksa capital case; input
+        // uppercase seperti "PT SUMBER MAKMUR" harus tetap uppercase.
+        $data['name'] = trim((string) $request->name);
         $data['status'] = 1; // Default: belum diperiksa
         $data['user_id'] = $request->user()->id;
 
@@ -217,9 +218,9 @@ class SupplierController extends Controller
             ]);
         }
 
-        // Capital case formatting for name
+        // Nama tetap seperti yang diketik (uppercase tidak diubah).
         if ($request->has('name')) {
-            $data['name'] = ucwords(strtolower($request->name));
+            $data['name'] = trim((string) $request->name);
         }
 
         // Only admin or super_admin can update status

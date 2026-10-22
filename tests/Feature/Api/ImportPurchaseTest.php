@@ -59,13 +59,18 @@ class ImportPurchaseTest extends TestCase
         ];
     }
 
-    private function makeImport(): ImportPurchase
+    private function makeImport(?Product $product = null, ?string $purchaseDate = null): ImportPurchase
     {
-        [$product, $supplier] = $this->ensureFixtures();
+        [$fixtureProduct, $supplier] = $this->ensureFixtures();
+        $product ??= $fixtureProduct;
+        $payload = $this->makeImportPayload($product, $supplier);
+        if ($purchaseDate !== null) {
+            $payload['purchase_date'] = $purchaseDate;
+        }
 
         Sanctum::actingAs($this->userWithRole('admin'));
 
-        $res = $this->postJson('/import-purchases', $this->makeImportPayload($product, $supplier));
+        $res = $this->postJson('/import-purchases', $payload);
         $res->assertCreated();
 
         $import = ImportPurchase::findOrFail($res->json('data.id'));
@@ -649,6 +654,38 @@ class ImportPurchaseTest extends TestCase
             $row['items'][0]['unit_price_idr'],
             0.01,
         );
+    }
+
+    public function test_price_trend_products_are_ordered_by_latest_purchase(): void
+    {
+        [$productA, $supplier] = $this->ensureFixtures();
+        $productB = Product::firstOrCreate(
+            ['sku' => 'TEST-IMPORT-TREND-B'],
+            [
+                'name' => 'Produk Trend B (test)',
+                'slug' => 'produk-trend-b-test',
+                'request' => 1,
+                'remaining' => 1,
+                'unit_id' => $productA->unit_id,
+                'material_group_id' => $productA->material_group_id,
+                'payment_type_id' => $productA->payment_type_id,
+                'online_category_id' => $productA->online_category_id,
+                'user_id' => 1,
+            ],
+        );
+
+        // B lebih baru dari A, meski nama A alfabetis lebih dulu.
+        $this->makeImport($productA, '2099-01-01');
+        $this->makeImport($productB, '2099-12-31');
+
+        $data = $this->getJson('/import-purchases/price-trends')->assertOk()->json('data');
+        $ids = array_column($data, 'product_id');
+        $aPosition = array_search($productA->id, $ids, true);
+        $bPosition = array_search($productB->id, $ids, true);
+
+        $this->assertNotFalse($aPosition);
+        $this->assertNotFalse($bPosition);
+        $this->assertLessThan($aPosition, $bPosition);
     }
 
     public function test_realization_input_switches_to_real_price_without_receiving(): void

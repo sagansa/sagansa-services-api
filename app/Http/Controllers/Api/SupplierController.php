@@ -356,7 +356,7 @@ class SupplierController extends Controller
         $acronyms = [
             'PT', 'CV', 'UD', 'PD', 'TBK', 'PERSERO', 'PERUM', 'BUMN', 'BUMD',
             'KUD', 'NV', 'BV', 'LTD', 'INC', 'LLC', 'CORP', 'GMBH', 'SDN',
-            'BHD', 'JSC', 'PLC', 'PTE',
+            'BHD', 'JSC', 'PLC', 'PTE', 'SPBU', 'NS',
         ];
 
         return preg_replace_callback('/[\p{L}\p{M}]+/u', function (array $match) use ($acronyms) {

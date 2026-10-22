@@ -244,6 +244,14 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::delete('/{id}', [\App\Http\Controllers\Api\ImportPurchaseController::class, 'destroy']);
     });
 
+    // Kurs referensi antar valuta per tanggal (analisa trend harga kontrak
+    // impor, mis. 1 USD = x VND) — tersimpan terpusat; admin/super_admin.
+    Route::prefix('currency-rates')->group(function () {
+        Route::get('/', [\App\Http\Controllers\Api\CurrencyRateController::class, 'index']);
+        Route::post('/', [\App\Http\Controllers\Api\CurrencyRateController::class, 'store']);
+        Route::delete('/', [\App\Http\Controllers\Api\CurrencyRateController::class, 'destroy']);
+    });
+
     Route::prefix('storage-stocks')->group(function () {
         Route::get('/monitoring', [\App\Http\Controllers\Api\StorageStockController::class, 'stockMonitoring']);
         Route::get('/products', [\App\Http\Controllers\Api\StorageStockController::class, 'products']);

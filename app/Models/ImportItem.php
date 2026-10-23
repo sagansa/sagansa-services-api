@@ -18,6 +18,7 @@ class ImportItem extends Model
         'quantity_received' => 'float',
         'hpp_estimate' => 'float',
         'hpp_real' => 'float',
+        'selling_price' => 'float',
     ];
 
     public function importPurchase()

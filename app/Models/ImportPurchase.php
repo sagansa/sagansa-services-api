@@ -15,6 +15,7 @@ class ImportPurchase extends Model
 
     protected $casts = [
         'exchange_rate' => 'float',
+        'usd_vnd_rate' => 'float',
         'purchase_date' => 'date:Y-m-d',
         'total_estimate' => 'float',
         'total_real' => 'float',

@@ -174,6 +174,9 @@ class ImportPurchaseController extends Controller
                     'supplier_name' => $import->supplier?->name,
                     'currency' => $import->currency,
                     'exchange_rate' => (float) $import->exchange_rate,
+                    'usd_vnd_rate' => $import->usd_vnd_rate !== null
+                        ? (float) $import->usd_vnd_rate
+                        : null,
                     'quantity' => (float) $item->quantity,
                     'quantity_received' => $item->quantity_received === null
                         ? null
@@ -275,6 +278,7 @@ class ImportPurchaseController extends Controller
                 'store_id' => $validated['store_id'] ?? null,
                 'currency' => $validated['currency'] ?? 'USD',
                 'exchange_rate' => $validated['exchange_rate'],
+                'usd_vnd_rate' => $validated['usd_vnd_rate'] ?? null,
                 'invoice_number' => $validated['invoice_number'] ?? null,
                 'purchase_date' => $validated['purchase_date'] ?? now()->toDateString(),
                 'stage' => 'draft',
@@ -320,6 +324,9 @@ class ImportPurchaseController extends Controller
                 'store_id' => array_key_exists('store_id', $validated) ? $validated['store_id'] : $import->store_id,
                 'currency' => $validated['currency'] ?? $import->currency,
                 'exchange_rate' => $validated['exchange_rate'] ?? $import->exchange_rate,
+                'usd_vnd_rate' => array_key_exists('usd_vnd_rate', $validated)
+                    ? $validated['usd_vnd_rate']
+                    : $import->usd_vnd_rate,
                 'invoice_number' => array_key_exists('invoice_number', $validated) ? $validated['invoice_number'] : $import->invoice_number,
                 'purchase_date' => array_key_exists('purchase_date', $validated) ? $validated['purchase_date'] : $import->purchase_date,
                 'notes' => array_key_exists('notes', $validated) ? $validated['notes'] : $import->notes,
@@ -639,7 +646,24 @@ class ImportPurchaseController extends Controller
             ], 422);
         }
 
-        $computed = DB::transaction(function () use ($import) {
+        // Harga jual opsional per item: map item_id => angka final. Persen
+        // margin & pembulatan dihitung client — server hanya menyimpan
+        // angka final yang dikirim.
+        $sellingPrices = collect($request->input('selling_prices', []))
+            ->filter(fn ($v) => $v !== null && $v !== '');
+        if ($sellingPrices->contains(fn ($v) => ! is_numeric($v) || (float) $v < 0)) {
+            return response()->json(['success' => false, 'message' => 'Harga jual harus berupa angka ≥ 0.'], 422);
+        }
+        $unknown = array_diff(
+            array_map('intval', $sellingPrices->keys()->all()),
+            array_map('intval', $import->items->pluck('id')->all()),
+        );
+        if ($unknown !== []) {
+            return response()->json(['success' => false, 'message' => 'selling_prices memuat item yang bukan milik proses impor ini.'], 422);
+        }
+        $sellingPrices = $sellingPrices->map(fn ($v) => round((float) $v, 2));
+
+        $computed = DB::transaction(function () use ($import, $sellingPrices) {
             $this->syncDerivedCosts($import);
             $import->load(['items', 'costs']);
             $computed = $this->computeFor($import);
@@ -658,6 +682,17 @@ class ImportPurchaseController extends Controller
                     'hpp' => round($row['hpp_real_unit'], 2),
                     'hpp_updated_at' => now(),
                 ]);
+
+                // Harga jual di luar HPP, ditetapkan manual saat finalisasi;
+                // harga terbaru di master produk dipakai prefill sales order
+                // online.
+                if (isset($sellingPrices[$item->id])) {
+                    $item->update(['selling_price' => $sellingPrices[$item->id]]);
+                    $item->product->update([
+                        'selling_price' => $sellingPrices[$item->id],
+                        'selling_price_updated_at' => now(),
+                    ]);
+                }
             }
 
             $import->update([
@@ -762,6 +797,7 @@ class ImportPurchaseController extends Controller
             'store_id' => 'nullable|exists:stores,id',
             'currency' => 'sometimes|string|size:3',
             'exchange_rate' => $required.'|numeric|gt:0',
+            'usd_vnd_rate' => 'sometimes|nullable|numeric|gt:0',
             'invoice_number' => 'nullable|string|max:100',
             'purchase_date' => 'sometimes|date',
             'notes' => 'nullable|string',

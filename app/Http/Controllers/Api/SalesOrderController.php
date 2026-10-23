@@ -605,13 +605,14 @@ class SalesOrderController extends Controller
 
     /**
      * Daftar produk yang bisa dijual online (whereNotIn online_category_id [4]).
+     * selling_price = harga jual terbaru dari finalisasi impor (prefill harga).
      */
     public function onlineProducts(Request $request)
     {
         $products = Product::with('unit')
             ->whereNotIn('online_category_id', [4])
             ->orderBy('name', 'asc')
-            ->get(['id', 'name', 'unit_id']);
+            ->get(['id', 'name', 'unit_id', 'selling_price']);
 
         return response()->json([
             'success' => true,
@@ -619,6 +620,7 @@ class SalesOrderController extends Controller
                 'id' => $p->id,
                 'name' => $p->name,
                 'unit' => $p->unit?->unit ?? '',
+                'selling_price' => (float) ($p->selling_price ?? 0),
             ]),
         ]);
     }

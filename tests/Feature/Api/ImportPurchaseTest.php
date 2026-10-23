@@ -17,7 +17,7 @@ class ImportPurchaseTest extends TestCase
     /** @var list<int> import yang dibuat test — dibersihkan di tearDown. */
     private array $createdImportIds = [];
 
-    /** @var array<int, array{hpp: mixed, hpp_updated_at: mixed, selling_price: mixed, selling_price_updated_at: mixed}> kondisi harga produk sebelum test (untuk dipulihkan). */
+    /** @var array<int, array{hpp: mixed, hpp_updated_at: mixed}> kondisi hpp produk sebelum test (untuk dipulihkan). */
     private array $productHppBackup = [];
 
     /**
@@ -75,12 +75,10 @@ class ImportPurchaseTest extends TestCase
 
         $import = ImportPurchase::findOrFail($res->json('data.id'));
         $this->createdImportIds[] = $import->id;
-        // Pulihkan hpp & harga jual produk bila test finalisasi menimpanya.
+        // Pulihkan hpp produk bila test finalisasi menimpanya.
         $this->productHppBackup[$product->id] = [
             'hpp' => $product->hpp,
             'hpp_updated_at' => $product->hpp_updated_at,
-            'selling_price' => $product->selling_price,
-            'selling_price_updated_at' => $product->selling_price_updated_at,
         ];
 
         return $import;
@@ -584,114 +582,6 @@ class ImportPurchaseTest extends TestCase
 
         // Finalisasi ganda → 422.
         $this->postJson("/import-purchases/{$import->id}/finalize")->assertStatus(422);
-    }
-
-    public function test_finalize_with_selling_prices_persists_item_and_product(): void
-    {
-        $import = $this->makeImport();
-        $item = $import->items()->first();
-        $productId = $item->product_id;
-        $import->update(['stage' => 'receiving']);
-        $import->items()->update(['quantity_received' => 11700]);
-
-        $res = $this->postJson("/import-purchases/{$import->id}/finalize", [
-            'selling_prices' => [$item->id => 28000],
-        ]);
-        $res->assertOk()->assertJsonPath('data.stage', 'finalized');
-
-        // Snapshot harga jual melekat di item + harga terbaru di master
-        // produk (sumber prefill sales order online).
-        $item->refresh();
-        $this->assertEqualsWithDelta(28000.0, (float) $item->selling_price, 0.01);
-
-        $product = Product::find($productId);
-        $this->assertEqualsWithDelta(28000.0, (float) $product->selling_price, 0.01);
-        $this->assertNotNull($product->selling_price_updated_at);
-
-        // Daftar produk online membawa harga jual untuk prefill.
-        $online = collect($this->getJson('/sales-orders/online-products')->assertOk()->json('data'))
-            ->firstWhere('id', $productId);
-        $this->assertNotNull($online);
-        $this->assertEqualsWithDelta(28000.0, (float) $online['selling_price'], 0.01);
-    }
-
-    public function test_finalize_without_selling_prices_keeps_price_null(): void
-    {
-        $import = $this->makeImport();
-        $item = $import->items()->first();
-        $import->update(['stage' => 'receiving']);
-        $import->items()->update(['quantity_received' => 11700]);
-
-        // Tanpa selling_prices finalisasi tetap berhasil (backward compat).
-        $this->postJson("/import-purchases/{$import->id}/finalize")
-            ->assertOk()->assertJsonPath('data.stage', 'finalized');
-
-        $this->assertNull($item->fresh()->selling_price);
-    }
-
-    public function test_finalize_rejects_foreign_or_negative_selling_prices(): void
-    {
-        $import = $this->makeImport();
-        $item = $import->items()->first();
-        $import->update(['stage' => 'receiving']);
-        $import->items()->update(['quantity_received' => 11700]);
-
-        // Item milik proses impor lain → 422, tahap tidak berubah.
-        $this->postJson("/import-purchases/{$import->id}/finalize", [
-            'selling_prices' => [99999999 => 1000],
-        ])->assertStatus(422);
-
-        $this->postJson("/import-purchases/{$import->id}/finalize", [
-            'selling_prices' => [$item->id => -5],
-        ])->assertStatus(422);
-
-        $this->assertSame('receiving', $import->fresh()->stage);
-    }
-
-    public function test_selling_prices_settable_mid_process_from_payment_stage(): void
-    {
-        $import = $this->makeImport();
-        $item = $import->items()->first();
-        $productId = $item->product_id;
-
-        // Draft (belum bayar): pengaturan harga jual belum tersedia.
-        $this->postJson("/import-purchases/{$import->id}/selling-prices", [
-            'selling_prices' => [$item->id => 21000],
-        ])->assertStatus(422);
-
-        $import->update(['stage' => 'payment']);
-        $this->postJson("/import-purchases/{$import->id}/selling-prices", [
-            'selling_prices' => [$item->id => 21000],
-        ])->assertOk();
-
-        $item->refresh();
-        $this->assertEqualsWithDelta(21000.0, (float) $item->selling_price, 0.01);
-
-        // Harga terbaru langsung mengalir ke master produk (prefill sales
-        // order online) — harga pasar bisa ditetapkan sebelum finalisasi.
-        $product = Product::find($productId);
-        $this->assertEqualsWithDelta(21000.0, (float) $product->selling_price, 0.01);
-        $this->assertNotNull($product->selling_price_updated_at);
-
-        // Finalisasi tanpa selling_prices mempertahankan harga yang sudah
-        // diputuskan di tengah proses.
-        $import->update(['stage' => 'receiving']);
-        $import->items()->update(['quantity_received' => 11700]);
-        $this->postJson("/import-purchases/{$import->id}/finalize")->assertOk();
-        $this->assertEqualsWithDelta(21000.0, (float) $item->fresh()->selling_price, 0.01);
-    }
-
-    public function test_selling_prices_rejected_after_finalize(): void
-    {
-        $import = $this->makeImport();
-        $item = $import->items()->first();
-        $import->update(['stage' => 'receiving']);
-        $import->items()->update(['quantity_received' => 11700]);
-        $this->postJson("/import-purchases/{$import->id}/finalize")->assertOk();
-
-        $this->postJson("/import-purchases/{$import->id}/selling-prices", [
-            'selling_prices' => [$item->id => 25000],
-        ])->assertStatus(422);
     }
 
     public function test_cancel_and_update_guards(): void

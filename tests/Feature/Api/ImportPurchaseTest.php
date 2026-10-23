@@ -648,6 +648,52 @@ class ImportPurchaseTest extends TestCase
         $this->assertSame('receiving', $import->fresh()->stage);
     }
 
+    public function test_selling_prices_settable_mid_process_from_payment_stage(): void
+    {
+        $import = $this->makeImport();
+        $item = $import->items()->first();
+        $productId = $item->product_id;
+
+        // Draft (belum bayar): pengaturan harga jual belum tersedia.
+        $this->postJson("/import-purchases/{$import->id}/selling-prices", [
+            'selling_prices' => [$item->id => 21000],
+        ])->assertStatus(422);
+
+        $import->update(['stage' => 'payment']);
+        $this->postJson("/import-purchases/{$import->id}/selling-prices", [
+            'selling_prices' => [$item->id => 21000],
+        ])->assertOk();
+
+        $item->refresh();
+        $this->assertEqualsWithDelta(21000.0, (float) $item->selling_price, 0.01);
+
+        // Harga terbaru langsung mengalir ke master produk (prefill sales
+        // order online) — harga pasar bisa ditetapkan sebelum finalisasi.
+        $product = Product::find($productId);
+        $this->assertEqualsWithDelta(21000.0, (float) $product->selling_price, 0.01);
+        $this->assertNotNull($product->selling_price_updated_at);
+
+        // Finalisasi tanpa selling_prices mempertahankan harga yang sudah
+        // diputuskan di tengah proses.
+        $import->update(['stage' => 'receiving']);
+        $import->items()->update(['quantity_received' => 11700]);
+        $this->postJson("/import-purchases/{$import->id}/finalize")->assertOk();
+        $this->assertEqualsWithDelta(21000.0, (float) $item->fresh()->selling_price, 0.01);
+    }
+
+    public function test_selling_prices_rejected_after_finalize(): void
+    {
+        $import = $this->makeImport();
+        $item = $import->items()->first();
+        $import->update(['stage' => 'receiving']);
+        $import->items()->update(['quantity_received' => 11700]);
+        $this->postJson("/import-purchases/{$import->id}/finalize")->assertOk();
+
+        $this->postJson("/import-purchases/{$import->id}/selling-prices", [
+            'selling_prices' => [$item->id => 25000],
+        ])->assertStatus(422);
+    }
+
     public function test_cancel_and_update_guards(): void
     {
         $import = $this->makeImport();

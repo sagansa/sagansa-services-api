@@ -238,6 +238,7 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::post('/{id}/documents', [\App\Http\Controllers\Api\ImportPurchaseController::class, 'storeDocument']);
         Route::delete('/{id}/documents/{docId}', [\App\Http\Controllers\Api\ImportPurchaseController::class, 'destroyDocument']);
         Route::post('/{id}/receive', [\App\Http\Controllers\Api\ImportPurchaseController::class, 'receive']);
+        Route::post('/{id}/selling-prices', [\App\Http\Controllers\Api\ImportPurchaseController::class, 'setSellingPrices']);
         Route::post('/{id}/advance', [\App\Http\Controllers\Api\ImportPurchaseController::class, 'advance']);
         Route::post('/{id}/finalize', [\App\Http\Controllers\Api\ImportPurchaseController::class, 'finalize']);
         Route::post('/{id}/cancel', [\App\Http\Controllers\Api\ImportPurchaseController::class, 'cancel']);

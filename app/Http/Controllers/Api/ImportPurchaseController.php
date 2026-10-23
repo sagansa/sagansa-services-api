@@ -10,8 +10,10 @@ use App\Models\ImportPurchase;
 use App\Services\ImportHppService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Symfony\Component\HttpFoundation\Response;
 
 use function Illuminate\Support\defer;
 
@@ -618,6 +620,51 @@ class ImportPurchaseController extends Controller
         ]);
     }
 
+    /**
+     * Atur harga jual di tengah proses (tahap payment..receiving) — rencana
+     * harga jual sejak pembayaran karena menentukan harga pasar lebih awal
+     * dari finalisasi; bisa dipanggil ulang seiring biaya real bertambah.
+     * Menulis snapshot per item + harga terbaru di master produk (prefill
+     * sales order online).
+     */
+    public function setSellingPrices($id, Request $request)
+    {
+        if (! $this->isAdmin($request)) {
+            return $this->forbidden();
+        }
+
+        $import = ImportPurchase::with(['items.product'])->find($id);
+        if (! $import) {
+            return response()->json(['success' => false, 'message' => 'Proses impor tidak ditemukan.'], 404);
+        }
+        if (! in_array($import->stage, ['payment', 'shipment', 'customs', 'arrival', 'receiving'], true)) {
+            return response()->json(['success' => false, 'message' => 'Harga jual bisa diatur setelah pembayaran dan sebelum finalisasi.'], 422);
+        }
+
+        $resolved = $this->resolveSellingPrices($request, $import);
+        if ($resolved instanceof Response) {
+            return $resolved;
+        }
+
+        DB::transaction(function () use ($import, $resolved): void {
+            foreach ($import->items as $item) {
+                if (isset($resolved[$item->id])) {
+                    $item->update(['selling_price' => $resolved[$item->id]]);
+                    $item->product->update([
+                        'selling_price' => $resolved[$item->id],
+                        'selling_price_updated_at' => now(),
+                    ]);
+                }
+            }
+        });
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Harga jual per produk tersimpan.',
+            'data' => $import->fresh(['items.product.unit']),
+        ]);
+    }
+
     public function finalize($id, Request $request)
     {
         if (! $this->isAdmin($request)) {
@@ -646,22 +693,12 @@ class ImportPurchaseController extends Controller
             ], 422);
         }
 
-        // Harga jual opsional per item: map item_id => angka final. Persen
-        // margin & pembulatan dihitung client — server hanya menyimpan
-        // angka final yang dikirim.
-        $sellingPrices = collect($request->input('selling_prices', []))
-            ->filter(fn ($v) => $v !== null && $v !== '');
-        if ($sellingPrices->contains(fn ($v) => ! is_numeric($v) || (float) $v < 0)) {
-            return response()->json(['success' => false, 'message' => 'Harga jual harus berupa angka ≥ 0.'], 422);
+        // Harga jual opsional per item: map item_id => angka final.
+        $resolved = $this->resolveSellingPrices($request, $import);
+        if ($resolved instanceof Response) {
+            return $resolved;
         }
-        $unknown = array_diff(
-            array_map('intval', $sellingPrices->keys()->all()),
-            array_map('intval', $import->items->pluck('id')->all()),
-        );
-        if ($unknown !== []) {
-            return response()->json(['success' => false, 'message' => 'selling_prices memuat item yang bukan milik proses impor ini.'], 422);
-        }
-        $sellingPrices = $sellingPrices->map(fn ($v) => round((float) $v, 2));
+        $sellingPrices = $resolved;
 
         $computed = DB::transaction(function () use ($import, $sellingPrices) {
             $this->syncDerivedCosts($import);
@@ -710,6 +747,31 @@ class ImportPurchaseController extends Controller
             'data' => $import->fresh(['supplier', 'items.product.unit', 'costs', 'documents']),
             'hpp' => $computed,
         ]);
+    }
+
+    /**
+     * Validasi input selling_prices (map item_id => angka final ≥ 0); nilai
+     * kosong/null dilewati. Persen margin & pembulatan dihitung client —
+     * server hanya menyimpan angka final yang dikirim.
+     *
+     * @return Collection|Response
+     */
+    private function resolveSellingPrices(Request $request, ImportPurchase $import)
+    {
+        $sellingPrices = collect($request->input('selling_prices', []))
+            ->filter(fn ($v) => $v !== null && $v !== '');
+        if ($sellingPrices->contains(fn ($v) => ! is_numeric($v) || (float) $v < 0)) {
+            return response()->json(['success' => false, 'message' => 'Harga jual harus berupa angka ≥ 0.'], 422);
+        }
+        $unknown = array_diff(
+            array_map('intval', $sellingPrices->keys()->all()),
+            array_map('intval', $import->items->pluck('id')->all()),
+        );
+        if ($unknown !== []) {
+            return response()->json(['success' => false, 'message' => 'selling_prices memuat item yang bukan milik proses impor ini.'], 422);
+        }
+
+        return $sellingPrices->map(fn ($v) => round((float) $v, 2));
     }
 
     public function cancel($id, Request $request)

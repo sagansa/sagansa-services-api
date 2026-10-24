@@ -17,6 +17,7 @@ use App\Http\Controllers\Api\AssetCheckController;
 use App\Http\Controllers\Api\AssetIssueController;
 use App\Http\Controllers\Api\ProductAssetConfigController;
 use App\Http\Controllers\Api\RecruitmentController;
+use App\Http\Controllers\Api\SopController;
 use Illuminate\Support\Facades\Route;
 
 // Media endpoint: serve storage files through Laravel so CORS headers are applied.
@@ -443,6 +444,13 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::prefix('asset-issues')->group(function () {
         Route::get('/', [AssetIssueController::class, 'index']);
         Route::post('/{id}/close', [AssetIssueController::class, 'close']);
+    });
+
+    // Konten panduan SOP (read-only, semua staf terautentikasi).
+    Route::get('/sop-categories', [SopController::class, 'categories']);
+    Route::prefix('sops')->group(function () {
+        Route::get('/', [SopController::class, 'index']);
+        Route::get('/{id}', [SopController::class, 'show']);
     });
 
     Route::prefix('admin')->group(function () {

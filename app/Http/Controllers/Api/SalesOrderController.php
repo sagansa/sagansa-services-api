@@ -455,6 +455,10 @@ class SalesOrderController extends Controller
                 'receipt_no' => $order->receipt_no,
                 'order_id' => $order->id,
                 'delivery_status' => $deliveryStatus,
+                // Path mentah & array URL dikirim berdampingan agar mobile
+                // tidak menyimpan paths stale di selectedOrder (sheet edit
+                // foto admin meng-seed dari pasangan ini).
+                'image_delivery_paths' => $newImagePaths,
                 // Kirim array URL agar mobile bisa render semua foto.
                 'image_delivery_urls' => array_map(
                     fn ($p) => $this->getStorageUrl($p),
@@ -464,6 +468,80 @@ class SalesOrderController extends Controller
                     ? $this->getStorageUrl($newImagePaths[0])
                     : null,
             ]
+        ]);
+    }
+
+    /**
+     * Ganti seluruh daftar foto bukti pengiriman order direct (for=1).
+     * Khusus admin & super_admin — admin bisa mengedit foto kapan saja,
+     * tanpa batasan status order (termasuk sudah terkirim/valid/dikembalikan),
+     * karena penggantian foto tidak menyentuh status/penerima order.
+     * Minimal 1 foto — foto bukti pengiriman adalah data inti status
+     * "sudah dikirim". Lihat spec 2026-09-04-direct-delivery-photo-admin-edit-design.
+     */
+    public function updateDeliveryPhotos(Request $request, $id)
+    {
+        $user = $request->user();
+        if (!$user->hasRole('admin') && !$user->hasRole('super_admin')) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Hanya admin yang dapat mengubah foto pengiriman.'
+            ], 403);
+        }
+
+        $order = DB::table('sales_orders')
+            ->where('id', $id)
+            ->where('for', '1')
+            ->whereNull('deleted_at')
+            ->first();
+
+        if (!$order) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Order tidak ditemukan.'
+            ], 404);
+        }
+
+        $validator = Validator::make($request->all(), [
+            'image_delivery' => 'required|array|min:1',
+            'image_delivery.*' => 'required|string',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'success' => false,
+                'message' => $validator->errors()->first(),
+                'errors' => $validator->errors(),
+            ], 422);
+        }
+
+        // Normalisasi path & hapus foto lama yang tidak ada di list baru
+        // (pola sama dengan updateDelivery()).
+        $newImagePaths = array_values(array_filter($request->input('image_delivery'), fn ($p) => filled($p)));
+        $oldImagePaths = $this->decodeImagePaths($order->image_delivery);
+        foreach (array_diff($oldImagePaths, $newImagePaths) as $dropped) {
+            app(\App\Contracts\ImageStorageContract::class)->delete($dropped);
+        }
+
+        DB::table('sales_orders')
+            ->where('id', $order->id)
+            ->update([
+                'image_delivery' => json_encode($newImagePaths),
+                'updated_at' => now(),
+            ]);
+
+        // Kembalikan order yang sudah diperkaya agar mobile langsung
+        // memperbarui tampilan (pola assign()).
+        $updatedOrder = $this->orderRowQuery()
+            ->where('sales_orders.id', $order->id)
+            ->whereNull('sales_orders.deleted_at')
+            ->first();
+        $this->enrichOrder($updatedOrder);
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Foto bukti pengiriman berhasil diperbarui.',
+            'data' => $updatedOrder,
         ]);
     }
 
@@ -487,7 +565,9 @@ class SalesOrderController extends Controller
     /**
      * Resolve `image_delivery` (JSON array path) menjadi URL absolut.
      *
-     * Mengisi dua field agar kompatibel dengan konsumer lama maupun baru:
+     * Mengisi tiga field agar kompatibel dengan konsumer lama maupun baru:
+     * - `image_delivery_paths`: array path mentah (dibutuhkan mobile untuk
+     *   seed sheet edit foto delivery — path lama yang dipertahankan).
      * - `image_delivery_urls`: array URL lengkap (konsisten dgn response
      *   `updateDelivery()` yang sudah memakai field plural).
      * - `image_delivery_url`: URL pertama (untuk konsumer lama yang membaca
@@ -501,6 +581,7 @@ class SalesOrderController extends Controller
     {
         $paths = $this->decodeImagePaths($order->image_delivery);
         $urls = array_map(fn ($p) => $this->getStorageUrl($p), $paths);
+        $order->image_delivery_paths = $paths;
         $order->image_delivery_urls = $urls;
         $order->image_delivery_url = $urls[0] ?? null;
     }

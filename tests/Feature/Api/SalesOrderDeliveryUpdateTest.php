@@ -150,6 +150,35 @@ class SalesOrderDeliveryUpdateTest extends TestCase
         ]);
     }
 
+    public function test_respons_memuat_image_delivery_paths_sinkron_dengan_urls(): void
+    {
+        // Sheet edit foto delivery (admin) meng-seed dari pasangan
+        // image_delivery_paths + image_delivery_urls; jika respons update
+        // kurir hanya membawa urls, selectedOrder mobile menyimpan paths
+        // stale dan penyimpanan berikutnya bisa menghapus file yang salah.
+        Sanctum::actingAs(User::factory()->create());
+
+        $orderId = $this->makeOnlineOrder('SO-' . strtoupper(uniqid()), 4);
+
+        $res = $this->postJson('/sales-orders/delivery-update', [
+            'order_id' => $orderId,
+            'delivery_status' => 3,
+            'received_by' => 'Tester',
+            'image_delivery' => ['images/Delivery/one.jpg', 'images/Delivery/two.jpg'],
+        ]);
+
+        $res->assertOk()->assertJsonPath('success', true)
+            ->assertJsonPath('data.image_delivery_paths', [
+                'images/Delivery/one.jpg',
+                'images/Delivery/two.jpg',
+            ])
+            ->assertJsonPath(
+                'data.image_delivery_url',
+                'https://img.sagansa.id/storage/images/Delivery/one.jpg'
+            )
+            ->assertJsonCount(2, 'data.image_delivery_urls');
+    }
+
     public function test_order_terkunci_tidak_dapat_diubah(): void
     {
         Sanctum::actingAs(User::factory()->create());

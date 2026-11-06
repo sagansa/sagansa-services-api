@@ -131,6 +131,8 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/sales-orders/{id}/items', [\App\Http\Controllers\Api\SalesOrderController::class, 'updateItems']);
     // Tetapkan toko &/atau status bayar order direct (admin only; role guard di controller).
     Route::post('/sales-orders/{id}/assign', [\App\Http\Controllers\Api\SalesOrderController::class, 'assign']);
+    // Ganti daftar foto bukti pengiriman order direct (admin only; role guard di controller).
+    Route::post('/sales-orders/{id}/delivery-photos', [\App\Http\Controllers\Api\SalesOrderController::class, 'updateDeliveryPhotos']);
     // Invoice pembelian terkait satu order (kartu di detail penjualan direct).
     Route::get('/sales-orders/{id}/purchase-invoices', [\App\Http\Controllers\Api\SalesOrderController::class, 'purchaseInvoices']);
 

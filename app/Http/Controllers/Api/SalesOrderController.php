@@ -720,6 +720,11 @@ class SalesOrderController extends Controller
             'items.*.quantity' => 'required|integer|min:1',
             'items.*.unit_price' => 'required|integer|min:0',
             'image_payment' => 'nullable|string',
+            // Idempotency: mobile mengirim UUID per sesi form; retry dengan
+            // key sama mengembalikan order existing, bukan INSERT baru.
+            'idempotency_key' => 'nullable|string|max:64',
+            // Override guard resi duplikat dalam window (dialog konfirmasi mobile).
+            'confirm_duplicate_receipt' => 'nullable|boolean',
         ]);
 
         if ($validator->fails()) {
@@ -744,12 +749,71 @@ class SalesOrderController extends Controller
             $totalPrice += $subtotal;
         }
 
+        // Didefinisikan di luar try agar tetap terlihat di catch (race dua
+        // request dengan key sama ditangani di sana).
+        $idempotencyKey = $request->input('idempotency_key');
+
         DB::beginTransaction();
         try {
             // Upload image_payment (jika ada) via ImageStorageContract
             $imagePaymentPath = null;
             if ($request->filled('image_payment')) {
                 $imagePaymentPath = $request->input('image_payment');
+            }
+
+            // === Idempotent replay ===
+            // Key sudah pernah tercatat (retry setelah timeout / jaringan
+            // drop setelah commit): kembalikan order existing, bukan order
+            // baru. withTrashed() karena baris soft-delete tetap memegang
+            // unique key — insert ulang dengan key sama akan 23000.
+            $existingByKey = $idempotencyKey
+                ? SalesOrderOnline::withTrashed()
+                    ->where('for', '3')
+                    ->where('idempotency_key', $idempotencyKey)
+                    ->first()
+                : null;
+            if ($existingByKey) {
+                DB::commit();
+
+                return response()->json([
+                    'success' => true,
+                    'message' => 'Sales order online sudah ada (idempotent replay).',
+                    'idempotent_replay' => true,
+                    'data' => $existingByKey->load('detailSalesOrders'),
+                ], 200);
+            }
+
+            // === Guard resi duplikat (window bergerak) ===
+            // Resi sama antar periode legitimate (provider daur ulang nomor
+            // resi), jadi cek hanya pada window N hari terakhir. Mobile
+            // menampilkan dialog konfirmasi; override diteruskan lewat
+            // confirm_duplicate_receipt.
+            if (! $request->boolean('confirm_duplicate_receipt')) {
+                $windowDays = (int) config('sales-order.duplicate_receipt_window_days', 31);
+                $duplicate = SalesOrderOnline::where('for', '3')
+                    ->where('receipt_no', $request->receipt_no)
+                    ->whereNull('deleted_at')
+                    ->where('created_at', '>=', now()->subDays($windowDays))
+                    ->orderByDesc('id')
+                    ->first();
+
+                if ($duplicate) {
+                    DB::rollBack();
+
+                    return response()->json([
+                        'success' => false,
+                        'message' => "Resi {$request->receipt_no} sudah tercatat pada order #{$duplicate->id}.",
+                        'duplicate_receipt' => true,
+                        'data' => [
+                            'existing_order_id' => $duplicate->id,
+                            'receipt_no' => $duplicate->receipt_no,
+                            'delivery_date' => $duplicate->delivery_date,
+                            'total_price' => (int) $duplicate->total_price,
+                            'store_nickname' => $duplicate->store?->nickname,
+                            'existing_created_at' => (string) $duplicate->created_at,
+                        ],
+                    ], 409);
+                }
             }
 
             $order = SalesOrderOnline::create([
@@ -759,6 +823,7 @@ class SalesOrderController extends Controller
                 'online_shop_provider_id' => $request->online_shop_provider_id,
                 'delivery_service_id' => $request->delivery_service_id,
                 'receipt_no' => $request->receipt_no,
+                'idempotency_key' => $idempotencyKey,
                 'image_payment' => $imagePaymentPath,
                 'payment_status' => '2',
                 'delivery_status' => '1',
@@ -797,6 +862,26 @@ class SalesOrderController extends Controller
             ], 201);
         } catch (\Exception $e) {
             DB::rollBack();
+
+            // Dua request key sama masuk bersamaan: keduanya lolos lookup,
+            // satu CREATE sukses, satu kena unique index (SQLSTATE 23000).
+            // Yang kalah bukan error — ia replay dari order pemenang.
+            if ($idempotencyKey
+                && str_contains($e->getMessage(), 'SQLSTATE[23000]')
+                && str_contains($e->getMessage(), 'sales_orders_idempotency_key_unique')) {
+                $winner = SalesOrderOnline::withTrashed()
+                    ->where('for', '3')
+                    ->where('idempotency_key', $idempotencyKey)
+                    ->first();
+                if ($winner) {
+                    return response()->json([
+                        'success' => true,
+                        'message' => 'Sales order online sudah ada (idempotent replay).',
+                        'idempotent_replay' => true,
+                        'data' => $winner->load('detailSalesOrders'),
+                    ], 200);
+                }
+            }
 
             return response()->json([
                 'success' => false,

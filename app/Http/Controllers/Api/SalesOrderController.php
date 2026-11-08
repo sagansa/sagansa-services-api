@@ -180,10 +180,10 @@ class SalesOrderController extends Controller
         }
 
         // Loose comparison: delivery_status bisa string maupun int.
-        if (in_array((int) $order->delivery_status, [2, 3, 6])) {
+        if (in_array((int) $order->delivery_status, [2, 3, 6, 7])) {
             return response()->json([
                 'success' => false,
-                'message' => 'Order sudah terkunci (valid/terkirim/dikembalikan) sehingga rincian produk tidak dapat diubah.'
+                'message' => 'Order sudah terkunci (valid/terkirim/dikembalikan/dibatalkan) sehingga rincian produk tidak dapat diubah.'
             ], 400);
         }
 
@@ -484,8 +484,12 @@ class SalesOrderController extends Controller
             ], 404);
         }
 
-        if (in_array((int)$order->delivery_status, [2, 6])) {
-            $statusName = $order->delivery_status == 2 ? 'valid' : 'dikembalikan';
+        if (in_array((int)$order->delivery_status, [2, 6, 7])) {
+            $statusName = match ((int)$order->delivery_status) {
+                2 => 'valid',
+                6 => 'dikembalikan',
+                default => 'dibatalkan',
+            };
             return response()->json([
                 'success' => false,
                 'message' => "Order sudah berstatus {$statusName} dan tidak dapat diubah."

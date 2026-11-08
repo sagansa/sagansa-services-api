@@ -214,4 +214,33 @@ class SalesOrderCancelTest extends TestCase
 
         $res->assertStatus(422);
     }
+
+    public function test_order_yang_sudah_dibatalkan_tidak_bisa_diupdate_delivery(): void
+    {
+        Sanctum::actingAs($this->userWithRole('admin'));
+        $orderId = $this->makeOnlineOrder(7);
+
+        $res = $this->postJson('/sales-orders/delivery-update', [
+            'order_id' => $orderId,
+            'delivery_status' => 3,
+        ]);
+
+        $res->assertStatus(400);
+        $this->assertStringContainsString('dibatalkan', (string) $res->json('message'));
+    }
+
+    public function test_order_yang_sudah_dibatalkan_tidak_bisa_edit_item(): void
+    {
+        Sanctum::actingAs($this->userWithRole('admin'));
+        $orderId = $this->makeOnlineOrder(7);
+
+        $res = $this->postJson("/sales-orders/{$orderId}/items", [
+            'items' => [
+                ['product_id' => 1, 'quantity' => 1, 'unit_price' => 1000],
+            ],
+        ]);
+
+        $res->assertStatus(400);
+        $this->assertStringContainsString('dibatalkan', (string) $res->json('message'));
+    }
 }

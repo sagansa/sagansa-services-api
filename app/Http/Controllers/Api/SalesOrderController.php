@@ -337,6 +337,98 @@ class SalesOrderController extends Controller
         ]);
     }
 
+    /**
+     * Batalkan order online (admin only). Kasus: pembeli membatalkan
+     * order di marketplace saat order masih "Siap Dikirim" (atau belum
+     * diproses) di sisi kita. Status final 7 = Dibatalkan.
+     * Whitelist pembatalan: 1 (belum dikirim), 4 (siap dikirim),
+     * 5 (perbaiki). Status 3 diarahkan ke alur refund, 2/6/7 final.
+     */
+    public function cancel(Request $request, $id)
+    {
+        $user = $request->user();
+        if (!$user->hasRole('admin') && !$user->hasRole('super_admin')) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Hanya admin yang dapat membatalkan order.'
+            ], 403);
+        }
+
+        $order = DB::table('sales_orders')
+            ->where('id', $id)
+            ->where('for', 3)
+            ->whereNull('deleted_at')
+            ->first();
+
+        if (!$order) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Order tidak ditemukan.'
+            ], 404);
+        }
+
+        $validator = Validator::make($request->all(), [
+            'reason' => 'required|string|max:500',
+        ]);
+        if ($validator->fails()) {
+            return response()->json([
+                'success' => false,
+                'message' => $validator->errors()->first(),
+                'errors' => $validator->errors()
+            ], 422);
+        }
+
+        // Loose comparison: delivery_status bisa string maupun int.
+        $status = (int) $order->delivery_status;
+
+        if ($status === 3) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Order sudah dikirim. Gunakan alur refund/kembalikan untuk membatalkan.'
+            ], 400);
+        }
+        if (in_array($status, [2, 6])) {
+            $statusName = $status === 2 ? 'valid' : 'dikembalikan';
+            return response()->json([
+                'success' => false,
+                'message' => "Order sudah berstatus {$statusName} (final) dan tidak dapat dibatalkan."
+            ], 400);
+        }
+        if ($status === 7) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Order sudah dibatalkan sebelumnya.'
+            ], 400);
+        }
+        if (!in_array($status, [1, 4, 5])) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Status order tidak dapat dibatalkan.'
+            ], 400);
+        }
+
+        $reason = $request->input('reason');
+
+        DB::table('sales_orders')
+            ->where('id', $order->id)
+            ->update([
+                'delivery_status' => 7,
+                'notes' => $reason,
+                'updated_at' => now(),
+            ]);
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Order berhasil dibatalkan.',
+            'data' => [
+                'order_id' => (int) $order->id,
+                'receipt_no' => $order->receipt_no,
+                'delivery_status' => 7,
+                'notes' => $reason,
+            ]
+        ]);
+    }
+
     public function updateDelivery(Request $request)
     {
         $validator = Validator::make($request->all(), [

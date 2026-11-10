@@ -197,6 +197,9 @@ Route::middleware('auth:sanctum')->group(function () {
 
     Route::prefix('procurement')->group(function () {
         Route::get('/products', [\App\Http\Controllers\Api\ProcurementController::class, 'products']);
+        // Info beli bahan baku (admin): tanggal beli terakhir per store,
+        // harga satuan terakhir, dan yang sedang dalam invoice belum lunas.
+        Route::get('/product-purchase-info', [\App\Http\Controllers\Api\ProcurementController::class, 'productPurchaseInfo']);
         Route::get('/requests', [\App\Http\Controllers\Api\ProcurementController::class, 'index']);
         Route::post('/requests', [\App\Http\Controllers\Api\ProcurementController::class, 'store']);
         Route::get('/requests/{id}', [\App\Http\Controllers\Api\ProcurementController::class, 'show']);

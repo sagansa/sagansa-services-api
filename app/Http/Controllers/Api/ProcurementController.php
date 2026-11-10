@@ -40,6 +40,125 @@ class ProcurementController extends Controller
     }
 
     /**
+     * Info beli bahan baku (admin): kapan terakhir dibeli (per store /
+     * semua toko), harga satuan terakhir, dan qty yang sedang terikat
+     * di invoice belum lunas.
+     */
+    public function productPurchaseInfo(Request $request)
+    {
+        $user = $request->user();
+        $isAdmin = $user && ($user->hasRole('admin') || $user->hasRole('super_admin'));
+        if (!$isAdmin) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Hanya Admin yang dapat melihat info pembelian bahan baku.'
+            ], 403);
+        }
+
+        $request->validate([
+            'store_id' => 'nullable|exists:stores,id',
+            'q' => 'nullable|string|max:100',
+            'per_page' => 'nullable|integer|min:1|max:100',
+        ]);
+
+        $storeId = $request->filled('store_id') ? $request->integer('store_id') : null;
+        $perPage = $request->integer('per_page', 30);
+
+        $products = Product::with('unit')
+            ->where('payment_type_id', '!=', '3')
+            ->when($request->filled('q'), function ($query) use ($request) {
+                $query->where('name', 'like', '%' . $request->string('q') . '%');
+            })
+            ->orderBy('name')
+            ->paginate($perPage);
+
+        $productIds = collect($products->items())->pluck('id')->all();
+
+        $lastPurchases = collect();
+        $inProcesses = collect();
+
+        if ($productIds) {
+            // Row pembelian terbaru per produk (exclude invoice Tidak Valid),
+            // unit price mengikuti konvensi subtotal_invoice / quantity_product.
+            $ranked = DB::table('detail_invoices as di')
+                ->join('detail_requests as dr', 'di.detail_request_id', '=', 'dr.id')
+                ->join('invoice_purchases as ip', 'di.invoice_purchase_id', '=', 'ip.id')
+                ->leftJoin('suppliers as s', 'ip.supplier_id', '=', 's.id')
+                ->leftJoin('stores as st', 'ip.store_id', '=', 'st.id')
+                ->whereIn('dr.product_id', $productIds)
+                ->where('di.quantity_product', '>', 0)
+                ->where('ip.payment_status', '!=', '3')
+                ->when($storeId, function ($query) use ($storeId) {
+                    $query->where('ip.store_id', $storeId);
+                })
+                ->selectRaw(
+                    'dr.product_id, (di.subtotal_invoice / di.quantity_product) as unit_price, ' .
+                    's.name as supplier_name, ip.date, st.id as store_id, st.nickname as store_name, ' .
+                    'ROW_NUMBER() OVER (PARTITION BY dr.product_id ORDER BY ip.date DESC, ip.id DESC) as rn'
+                );
+
+            $lastPurchases = DB::query()->fromSub($ranked, 'ranked')
+                ->where('rn', 1)
+                ->get()
+                ->keyBy('product_id');
+
+            // Qty yang sedang dalam proses invoice (Belum Dibayar) per produk.
+            $inProcesses = DB::table('detail_invoices as di')
+                ->join('detail_requests as dr', 'di.detail_request_id', '=', 'dr.id')
+                ->join('invoice_purchases as ip', 'di.invoice_purchase_id', '=', 'ip.id')
+                ->whereIn('dr.product_id', $productIds)
+                ->where('ip.payment_status', '1')
+                ->when($storeId, function ($query) use ($storeId) {
+                    $query->where('ip.store_id', $storeId);
+                })
+                ->groupBy('dr.product_id')
+                ->selectRaw(
+                    'dr.product_id, SUM(di.quantity_product) as quantity, ' .
+                    'COUNT(DISTINCT di.invoice_purchase_id) as invoice_count, ' .
+                    'MIN(ip.date) as oldest_invoice_date'
+                )
+                ->get()
+                ->keyBy('product_id');
+        }
+
+        $data = collect($products->items())->map(function ($product) use ($lastPurchases, $inProcesses) {
+            $last = $lastPurchases->get($product->id);
+            $process = $inProcesses->get($product->id);
+
+            return [
+                'id' => $product->id,
+                'name' => $product->name,
+                'unit' => $product->unit
+                    ? ['id' => $product->unit->id, 'unit' => $product->unit->unit]
+                    : null,
+                'last_purchase' => $last ? [
+                    'date' => $last->date,
+                    'unit_price' => (int) round($last->unit_price),
+                    'supplier_name' => $last->supplier_name,
+                    'store_id' => $last->store_id,
+                    'store_name' => $last->store_name,
+                ] : null,
+                'in_process' => $process ? [
+                    'quantity' => (float) $process->quantity,
+                    'invoice_count' => (int) $process->invoice_count,
+                    'oldest_invoice_date' => $process->oldest_invoice_date,
+                ] : null,
+            ];
+        });
+
+        return response()->json([
+            'success' => true,
+            'data' => $data,
+            'pagination' => [
+                'current_page' => $products->currentPage(),
+                'last_page' => $products->lastPage(),
+                'per_page' => $products->perPage(),
+                'total' => $products->total(),
+            ],
+        ]);
+    }
+
+    /**
      * Get list of request purchases.
      */
     public function index(Request $request)

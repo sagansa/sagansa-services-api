@@ -149,6 +149,56 @@ class ProductPurchaseInfoTest extends TestCase
         }
     }
 
+    public function test_list_includes_recent_purchases_max_five(): void
+    {
+        Sanctum::actingAs($this->userWithRole('admin'));
+
+        $store = \App\Models\Store::first();
+        if (!$store) {
+            $this->markTestSkipped('Need at least 1 store in database');
+        }
+
+        $name = 'TST Recent ' . uniqid();
+        $productId = $this->createTestProduct($name);
+        // 6 pembelian — response hanya boleh memuat 5 terbaru.
+        $ids = [];
+        try {
+            foreach ([
+                ['date' => '2026-04-01', 'qty' => 1, 'subtotal' => 1000],
+                ['date' => '2026-05-01', 'qty' => 1, 'subtotal' => 2000],
+                ['date' => '2026-06-01', 'qty' => 1, 'subtotal' => 3000],
+                ['date' => '2026-07-01', 'qty' => 1, 'subtotal' => 4000],
+                ['date' => '2026-08-01', 'qty' => 1, 'subtotal' => 5000],
+                ['date' => '2026-09-01', 'qty' => 1, 'subtotal' => 6000],
+            ] as $i => $spec) {
+                $ids[] = $this->seedPurchaseChain(
+                    $productId,
+                    $store->id,
+                    ['date' => $spec['date']],
+                    $spec['qty'],
+                    $spec['subtotal'],
+                );
+            }
+
+            $res = $this->getJson('/procurement/product-purchase-info?q=' . urlencode($name));
+
+            $res->assertOk();
+            $row = collect($res->json('data'))->firstWhere('id', $productId);
+            $recent = $row['recent_purchases'];
+
+            $this->assertCount(5, $recent);
+            // Terbaru dulu; pembelian April (terlama) ter-exclude.
+            $this->assertEquals('2026-09-01', substr($recent[0]['date'], 0, 10));
+            $this->assertEquals(6000, $recent[0]['unit_price']);
+            $this->assertEquals('2026-05-01', substr($recent[4]['date'], 0, 10));
+            $this->assertNotContains('2026-04-01', array_column($recent, 'date'));
+        } finally {
+            foreach ($ids as $chain) {
+                $this->cleanupChain($productId, $chain);
+            }
+        }
+    }
+
     public function test_list_sorted_by_last_purchase_date_desc(): void
     {
         Sanctum::actingAs($this->userWithRole('admin'));

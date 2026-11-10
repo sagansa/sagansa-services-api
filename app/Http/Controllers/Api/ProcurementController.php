@@ -110,6 +110,7 @@ class ProcurementController extends Controller
         $productIds = collect($products->items())->pluck('id')->all();
 
         $inProcesses = collect();
+        $recentPurchases = collect();
 
         if ($productIds) {
             // Qty yang sedang dalam proses invoice (Belum Dibayar) per produk.
@@ -129,32 +130,73 @@ class ProcurementController extends Controller
                 )
                 ->get()
                 ->keyBy('product_id');
+
+            // 5 pembelian terakhir per produk (untuk kartu di list mobile).
+            $rankedRecent = DB::table('detail_invoices as di')
+                ->join('detail_requests as dr', 'di.detail_request_id', '=', 'dr.id')
+                ->join('invoice_purchases as ip', 'di.invoice_purchase_id', '=', 'ip.id')
+                ->leftJoin('suppliers as s', 'ip.supplier_id', '=', 's.id')
+                ->leftJoin('stores as st', 'ip.store_id', '=', 'st.id')
+                ->whereIn('dr.product_id', $productIds)
+                ->where('di.quantity_product', '>', 0)
+                ->where('ip.payment_status', '!=', '3')
+                ->when($storeId, function ($query) use ($storeId) {
+                    $query->where('ip.store_id', $storeId);
+                })
+                ->selectRaw(
+                    'dr.product_id, (di.subtotal_invoice / di.quantity_product) as unit_price, ' .
+                    'di.quantity_product as quantity, s.name as supplier_name, ip.date, ' .
+                    'st.id as store_id, st.nickname as store_name, ' .
+                    'ROW_NUMBER() OVER (PARTITION BY dr.product_id ORDER BY ip.date DESC, ip.id DESC) as rn'
+                );
+
+            $recentPurchases = DB::query()->fromSub($rankedRecent, 'recent')
+                ->where('rn', '<=', 5)
+                ->orderBy('product_id')
+                ->orderBy('rn')
+                ->get()
+                ->groupBy('product_id');
         }
 
-        $data = collect($products->items())->map(function ($product) use ($inProcesses) {
-            $process = $inProcesses->get($product->id);
+        $data = collect($products->items())->map(
+            function ($product) use ($inProcesses, $recentPurchases) {
+                $process = $inProcesses->get($product->id);
 
-            return [
-                'id' => $product->id,
-                'name' => $product->name,
-                'unit' => $product->unit
-                    ? ['id' => $product->unit->id, 'unit' => $product->unit->unit]
-                    : null,
-                'last_purchase' => $product->lp_date !== null ? [
-                    'date' => $product->lp_date,
-                    'quantity' => (float) $product->lp_quantity,
-                    'unit_price' => (int) round($product->lp_unit_price),
-                    'supplier_name' => $product->lp_supplier_name,
-                    'store_id' => $product->lp_store_id,
-                    'store_name' => $product->lp_store_name,
-                ] : null,
-                'in_process' => $process ? [
-                    'quantity' => (float) $process->quantity,
-                    'invoice_count' => (int) $process->invoice_count,
-                    'oldest_invoice_date' => $process->oldest_invoice_date,
-                ] : null,
-            ];
-        });
+                return [
+                    'id' => $product->id,
+                    'name' => $product->name,
+                    'unit' => $product->unit
+                        ? ['id' => $product->unit->id, 'unit' => $product->unit->unit]
+                        : null,
+                    'last_purchase' => $product->lp_date !== null ? [
+                        'date' => $product->lp_date,
+                        'quantity' => (float) $product->lp_quantity,
+                        'unit_price' => (int) round($product->lp_unit_price),
+                        'supplier_name' => $product->lp_supplier_name,
+                        'store_id' => $product->lp_store_id,
+                        'store_name' => $product->lp_store_name,
+                    ] : null,
+                    'recent_purchases' => ($recentPurchases->get($product->id) ?? collect())
+                        ->map(function ($row) {
+                            return [
+                                'date' => $row->date,
+                                'quantity' => (float) $row->quantity,
+                                'unit_price' => (int) round($row->unit_price),
+                                'supplier_name' => $row->supplier_name,
+                                'store_id' => $row->store_id,
+                                'store_name' => $row->store_name,
+                            ];
+                        })
+                        ->values()
+                        ->all(),
+                    'in_process' => $process ? [
+                        'quantity' => (float) $process->quantity,
+                        'invoice_count' => (int) $process->invoice_count,
+                        'oldest_invoice_date' => $process->oldest_invoice_date,
+                    ] : null,
+                ];
+            }
+        );
 
         return response()->json([
             'success' => true,

@@ -185,9 +185,11 @@ class ProcurementController extends Controller
 
         $request->validate([
             'store_id' => 'nullable|exists:stores,id',
+            'year' => 'nullable|integer|min:2000|max:2100',
         ]);
 
         $storeId = $request->filled('store_id') ? $request->integer('store_id') : null;
+        $year = $request->filled('year') ? $request->integer('year') : null;
 
         $product = Product::with('unit')
             ->where('payment_type_id', '!=', '3')
@@ -210,6 +212,19 @@ class ProcurementController extends Controller
             ->when($storeId, function ($query) use ($storeId) {
                 $query->where('ip.store_id', $storeId);
             });
+
+        // Daftar tahun yang tersedia — dihitung SEBELUM filter tahun
+        // diterapkan agar chip tahun tetap lengkap saat filter aktif.
+        $availableYears = (clone $base)
+            ->selectRaw('DISTINCT YEAR(ip.date) as year')
+            ->orderByDesc('year')
+            ->pluck('year')
+            ->map(fn ($y) => (int) $y)
+            ->all();
+
+        $base->when($year, function ($query) use ($year) {
+            $query->whereYear('ip.date', $year);
+        });
 
         // Ringkasan dihitung dari seluruh riwayat (bukan hanya halaman list).
         $summary = (clone $base)
@@ -265,6 +280,7 @@ class ProcurementController extends Controller
                         ? ['id' => $product->unit->id, 'unit' => $product->unit->unit]
                         : null,
                 ],
+                'available_years' => $availableYears,
                 'summary' => $summary && $summary->total_invoices ? [
                     'total_invoices' => (int) $summary->total_invoices,
                     'total_quantity' => (float) $summary->total_quantity,

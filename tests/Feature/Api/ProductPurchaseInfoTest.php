@@ -379,6 +379,42 @@ class ProductPurchaseInfoTest extends TestCase
         }
     }
 
+    public function test_detail_year_filter_scopes_history(): void
+    {
+        Sanctum::actingAs($this->userWithRole('admin'));
+
+        $store = \App\Models\Store::first();
+        if (!$store) {
+            $this->markTestSkipped('Need at least 1 store in database');
+        }
+
+        $name = 'TST Year ' . uniqid();
+        $productId = $this->createTestProduct($name);
+        $idsA = $this->seedPurchaseChain($productId, $store->id, ['date' => '2025-05-01'], 2, 2000);
+        $idsB = $this->seedPurchaseChain($productId, $store->id, ['date' => '2026-06-01'], 3, 3000);
+
+        try {
+            // Tanpa filter: semua tahun tersedia sebagai opsi.
+            $res = $this->getJson("/procurement/product-purchase-info/$productId");
+            $data = $res->json('data');
+            $this->assertContains(2025, $data['available_years']);
+            $this->assertContains(2026, $data['available_years']);
+            $this->assertEquals(2, $data['summary']['total_invoices']);
+
+            // Filter 2025: hanya pembelian 2025, available_years tetap lengkap.
+            $res = $this->getJson("/procurement/product-purchase-info/$productId?year=2025");
+            $data = $res->json('data');
+            $this->assertEquals(1, $data['summary']['total_invoices']);
+            $this->assertEquals(2, (int) $data['summary']['total_quantity']);
+            $this->assertCount(1, $data['history']);
+            $this->assertEquals('2025-05-01', substr($data['history'][0]['date'], 0, 10));
+            $this->assertContains(2026, $data['available_years']);
+        } finally {
+            $this->cleanupChain($productId, $idsA);
+            $this->cleanupChain($productId, $idsB);
+        }
+    }
+
     public function test_detail_forbidden_for_non_admin(): void
     {
         Sanctum::actingAs($this->userWithRole('staff'));

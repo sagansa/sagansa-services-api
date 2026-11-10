@@ -134,6 +134,7 @@ class ProductPurchaseInfoTest extends TestCase
             $this->assertNotNull($row, 'Produk test harus muncul di response');
             $this->assertNotNull($row['last_purchase']);
             $this->assertEquals(5000, $row['last_purchase']['unit_price']); // 25000 / 5
+            $this->assertEquals(5, (int) $row['last_purchase']['quantity']);
             $this->assertEquals($store->id, (int) $row['last_purchase']['store_id']);
             $this->assertNotNull($row['last_purchase']['supplier_name']);
             $this->assertNotNull($row['last_purchase']['date']);
@@ -145,6 +146,38 @@ class ProductPurchaseInfoTest extends TestCase
             $this->assertArrayHasKey('pagination', $res->json());
         } finally {
             $this->cleanupChain($productId, $ids);
+        }
+    }
+
+    public function test_list_sorted_by_last_purchase_date_desc(): void
+    {
+        Sanctum::actingAs($this->userWithRole('admin'));
+
+        $store = \App\Models\Store::first();
+        if (!$store) {
+            $this->markTestSkipped('Need at least 1 store in database');
+        }
+
+        $token = uniqid();
+        $olderId = $this->createTestProduct("TST SortLama $token");
+        $newerId = $this->createTestProduct("TST SortBaru $token");
+        $neverId = $this->createTestProduct("TST SortBelum $token");
+
+        $idsOlder = $this->seedPurchaseChain($olderId, $store->id, ['date' => '2026-10-01'], 2, 2000);
+        $idsNewer = $this->seedPurchaseChain($newerId, $store->id, ['date' => '2026-10-20'], 3, 3000);
+
+        try {
+            $res = $this->getJson('/procurement/product-purchase-info?q=' . urlencode($token));
+
+            $res->assertOk();
+            $ids = array_column($res->json('data'), 'id');
+
+            // Terbaru dibeli paling atas, belum pernah dibeli paling bawah.
+            $this->assertSame([$newerId, $olderId, $neverId], array_map('intval', $ids));
+        } finally {
+            $this->cleanupChain($olderId, $idsOlder);
+            $this->cleanupChain($newerId, $idsNewer);
+            DB::table('products')->where('id', $neverId)->delete();
         }
     }
 
@@ -261,6 +294,119 @@ class ProductPurchaseInfoTest extends TestCase
             $this->assertNotNull($row);
             $this->assertNull($row['last_purchase']);
             $this->assertNull($row['in_process']);
+        } finally {
+            DB::table('products')->where('id', $productId)->delete();
+        }
+    }
+
+    public function test_detail_returns_history_and_summary(): void
+    {
+        Sanctum::actingAs($this->userWithRole('admin'));
+
+        $store = \App\Models\Store::first();
+        if (!$store) {
+            $this->markTestSkipped('Need at least 1 store in database');
+        }
+
+        $name = 'TST Detail ' . uniqid();
+        $productId = $this->createTestProduct($name);
+        // 2 pembelian: 1 Okt 2x1000=2000 (subtotal 2000, qty 2) dan
+        // 5 Okt 4x2000=8000 → min 1000, max 2000, avg 1500.
+        $idsOld = $this->seedPurchaseChain($productId, $store->id, ['date' => '2026-10-01'], 2, 2000);
+        $idsNew = $this->seedPurchaseChain($productId, $store->id, ['date' => '2026-10-05'], 4, 8000);
+
+        try {
+            $res = $this->getJson("/procurement/product-purchase-info/$productId");
+
+            $res->assertOk()->assertJson(['success' => true]);
+            $data = $res->json('data');
+
+            $this->assertEquals($productId, $data['product']['id']);
+            $this->assertEquals($name, $data['product']['name']);
+
+            $this->assertNotNull($data['summary']);
+            $this->assertEquals(2, $data['summary']['total_invoices']);
+            $this->assertEquals(6, (int) $data['summary']['total_quantity']);
+            $this->assertEquals(10000, $data['summary']['total_value']);
+            $this->assertEquals(1000, $data['summary']['min_unit_price']);
+            $this->assertEquals(2000, $data['summary']['max_unit_price']);
+            $this->assertEquals(1500, $data['summary']['avg_unit_price']);
+            $this->assertEquals('2026-10-01', substr($data['summary']['first_date'], 0, 10));
+            $this->assertEquals('2026-10-05', substr($data['summary']['last_date'], 0, 10));
+
+            $history = $data['history'];
+            $this->assertCount(2, $history);
+            // Terbaru dulu.
+            $this->assertEquals('2026-10-05', substr($history[0]['date'], 0, 10));
+            $this->assertEquals(2000, $history[0]['unit_price']);
+            $this->assertEquals(8000, $history[0]['subtotal']);
+            $this->assertEquals(4, (int) $history[0]['quantity']);
+            $this->assertNotNull($history[0]['supplier_name']);
+            $this->assertArrayHasKey('payment_status', $history[0]);
+        } finally {
+            $this->cleanupChain($productId, $idsOld);
+            $this->cleanupChain($productId, $idsNew);
+        }
+    }
+
+    public function test_detail_store_filter_scopes_history(): void
+    {
+        Sanctum::actingAs($this->userWithRole('admin'));
+
+        $stores = \App\Models\Store::orderBy('id')->limit(2)->get();
+        if ($stores->count() < 2) {
+            $this->markTestSkipped('Need at least 2 stores in database');
+        }
+        [$storeA, $storeB] = $stores->values();
+
+        $name = 'TST Detail Scope ' . uniqid();
+        $productId = $this->createTestProduct($name);
+        $idsA = $this->seedPurchaseChain($productId, $storeA->id, ['date' => '2026-10-01'], 3, 3000);
+        $idsB = $this->seedPurchaseChain($productId, $storeB->id, ['date' => '2026-10-02'], 5, 5000);
+
+        try {
+            $res = $this->getJson("/procurement/product-purchase-info/$productId?store_id={$storeA->id}");
+
+            $res->assertOk();
+            $data = $res->json('data');
+            $this->assertEquals(1, $data['summary']['total_invoices']);
+            $this->assertEquals(3, (int) $data['summary']['total_quantity']);
+            $this->assertCount(1, $data['history']);
+            $this->assertEquals((int) $storeA->id, (int) $data['history'][0]['store_id']);
+        } finally {
+            $this->cleanupChain($productId, $idsA);
+            $this->cleanupChain($productId, $idsB);
+        }
+    }
+
+    public function test_detail_forbidden_for_non_admin(): void
+    {
+        Sanctum::actingAs($this->userWithRole('staff'));
+
+        $this->getJson('/procurement/product-purchase-info/1')->assertStatus(403);
+    }
+
+    public function test_detail_unknown_product_returns_404(): void
+    {
+        Sanctum::actingAs($this->userWithRole('admin'));
+
+        $this->getJson('/procurement/product-purchase-info/99999999')->assertStatus(404);
+    }
+
+    public function test_detail_product_without_history_has_null_summary(): void
+    {
+        Sanctum::actingAs($this->userWithRole('admin'));
+
+        $name = 'TST Detail Empty ' . uniqid();
+        $productId = $this->createTestProduct($name);
+
+        try {
+            $res = $this->getJson("/procurement/product-purchase-info/$productId");
+
+            $res->assertOk();
+            $data = $res->json('data');
+            $this->assertNull($data['summary']);
+            $this->assertEquals([], $data['history']);
         } finally {
             DB::table('products')->where('id', $productId)->delete();
         }

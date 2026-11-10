@@ -64,44 +64,54 @@ class ProcurementController extends Controller
         $storeId = $request->filled('store_id') ? $request->integer('store_id') : null;
         $perPage = $request->integer('per_page', 30);
 
-        $products = Product::with('unit')
-            ->where('payment_type_id', '!=', '3')
-            ->when($request->filled('q'), function ($query) use ($request) {
-                $query->where('name', 'like', '%' . $request->string('q') . '%');
+        // Row pembelian terbaru per produk (exclude invoice Tidak Valid) —
+        // sekaligus sumber data "terakhir beli" dan kunci sortir daftar.
+        // Unit price mengikuti konvensi subtotal_invoice / quantity_product.
+        $ranked = DB::table('detail_invoices as di')
+            ->join('detail_requests as dr', 'di.detail_request_id', '=', 'dr.id')
+            ->join('invoice_purchases as ip', 'di.invoice_purchase_id', '=', 'ip.id')
+            ->leftJoin('suppliers as s', 'ip.supplier_id', '=', 's.id')
+            ->leftJoin('stores as st', 'ip.store_id', '=', 'st.id')
+            ->where('di.quantity_product', '>', 0)
+            ->where('ip.payment_status', '!=', '3')
+            ->when($storeId, function ($query) use ($storeId) {
+                $query->where('ip.store_id', $storeId);
             })
-            ->orderBy('name')
+            ->selectRaw(
+                'dr.product_id, (di.subtotal_invoice / di.quantity_product) as unit_price, ' .
+                'di.quantity_product as quantity, s.name as supplier_name, ip.date, ' .
+                'st.id as store_id, st.nickname as store_name, ' .
+                'ROW_NUMBER() OVER (PARTITION BY dr.product_id ORDER BY ip.date DESC, ip.id DESC) as rn'
+            );
+
+        $products = Product::query()
+            ->with('unit')
+            ->selectRaw(
+                'products.*, lp.unit_price as lp_unit_price, lp.quantity as lp_quantity, ' .
+                'lp.supplier_name as lp_supplier_name, lp.date as lp_date, ' .
+                'lp.store_id as lp_store_id, lp.store_name as lp_store_name'
+            )
+            ->leftJoinSub($ranked, 'lp', function ($join) {
+                $join->on('lp.product_id', '=', 'products.id')
+                    ->where('lp.rn', '=', 1);
+            })
+            ->where('products.payment_type_id', '!=', '3')
+            ->when($request->filled('q'), function ($query) use ($request) {
+                $query->where('products.name', 'like', '%' . $request->string('q') . '%');
+            })
+            // Yang paling baru dibeli di atas; belum pernah dibeli di bawah,
+            // masing-masing kelompok alfabetis.
+            ->orderByRaw('lp.date IS NULL')
+            ->orderByDesc('lp.date')
+            ->orderBy('products.name')
+            ->orderByDesc('products.id')
             ->paginate($perPage);
 
         $productIds = collect($products->items())->pluck('id')->all();
 
-        $lastPurchases = collect();
         $inProcesses = collect();
 
         if ($productIds) {
-            // Row pembelian terbaru per produk (exclude invoice Tidak Valid),
-            // unit price mengikuti konvensi subtotal_invoice / quantity_product.
-            $ranked = DB::table('detail_invoices as di')
-                ->join('detail_requests as dr', 'di.detail_request_id', '=', 'dr.id')
-                ->join('invoice_purchases as ip', 'di.invoice_purchase_id', '=', 'ip.id')
-                ->leftJoin('suppliers as s', 'ip.supplier_id', '=', 's.id')
-                ->leftJoin('stores as st', 'ip.store_id', '=', 'st.id')
-                ->whereIn('dr.product_id', $productIds)
-                ->where('di.quantity_product', '>', 0)
-                ->where('ip.payment_status', '!=', '3')
-                ->when($storeId, function ($query) use ($storeId) {
-                    $query->where('ip.store_id', $storeId);
-                })
-                ->selectRaw(
-                    'dr.product_id, (di.subtotal_invoice / di.quantity_product) as unit_price, ' .
-                    's.name as supplier_name, ip.date, st.id as store_id, st.nickname as store_name, ' .
-                    'ROW_NUMBER() OVER (PARTITION BY dr.product_id ORDER BY ip.date DESC, ip.id DESC) as rn'
-                );
-
-            $lastPurchases = DB::query()->fromSub($ranked, 'ranked')
-                ->where('rn', 1)
-                ->get()
-                ->keyBy('product_id');
-
             // Qty yang sedang dalam proses invoice (Belum Dibayar) per produk.
             $inProcesses = DB::table('detail_invoices as di')
                 ->join('detail_requests as dr', 'di.detail_request_id', '=', 'dr.id')
@@ -121,8 +131,7 @@ class ProcurementController extends Controller
                 ->keyBy('product_id');
         }
 
-        $data = collect($products->items())->map(function ($product) use ($lastPurchases, $inProcesses) {
-            $last = $lastPurchases->get($product->id);
+        $data = collect($products->items())->map(function ($product) use ($inProcesses) {
             $process = $inProcesses->get($product->id);
 
             return [
@@ -131,12 +140,13 @@ class ProcurementController extends Controller
                 'unit' => $product->unit
                     ? ['id' => $product->unit->id, 'unit' => $product->unit->unit]
                     : null,
-                'last_purchase' => $last ? [
-                    'date' => $last->date,
-                    'unit_price' => (int) round($last->unit_price),
-                    'supplier_name' => $last->supplier_name,
-                    'store_id' => $last->store_id,
-                    'store_name' => $last->store_name,
+                'last_purchase' => $product->lp_date !== null ? [
+                    'date' => $product->lp_date,
+                    'quantity' => (float) $product->lp_quantity,
+                    'unit_price' => (int) round($product->lp_unit_price),
+                    'supplier_name' => $product->lp_supplier_name,
+                    'store_id' => $product->lp_store_id,
+                    'store_name' => $product->lp_store_name,
                 ] : null,
                 'in_process' => $process ? [
                     'quantity' => (float) $process->quantity,
@@ -154,6 +164,118 @@ class ProcurementController extends Controller
                 'last_page' => $products->lastPage(),
                 'per_page' => $products->perPage(),
                 'total' => $products->total(),
+            ],
+        ]);
+    }
+
+    /**
+     * Detail riwayat pembelian satu bahan baku (admin): daftar invoice
+     * yang memuat produk + ringkasan statistik untuk analisa.
+     */
+    public function productPurchaseInfoDetail($productId, Request $request)
+    {
+        $user = $request->user();
+        $isAdmin = $user && ($user->hasRole('admin') || $user->hasRole('super_admin'));
+        if (!$isAdmin) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Hanya Admin yang dapat melihat info pembelian bahan baku.'
+            ], 403);
+        }
+
+        $request->validate([
+            'store_id' => 'nullable|exists:stores,id',
+        ]);
+
+        $storeId = $request->filled('store_id') ? $request->integer('store_id') : null;
+
+        $product = Product::with('unit')
+            ->where('payment_type_id', '!=', '3')
+            ->find($productId);
+        if (!$product) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Bahan baku tidak ditemukan.'
+            ], 404);
+        }
+
+        $base = DB::table('detail_invoices as di')
+            ->join('detail_requests as dr', 'di.detail_request_id', '=', 'dr.id')
+            ->join('invoice_purchases as ip', 'di.invoice_purchase_id', '=', 'ip.id')
+            ->leftJoin('suppliers as s', 'ip.supplier_id', '=', 's.id')
+            ->leftJoin('stores as st', 'ip.store_id', '=', 'st.id')
+            ->where('dr.product_id', $productId)
+            ->where('di.quantity_product', '>', 0)
+            ->where('ip.payment_status', '!=', '3')
+            ->when($storeId, function ($query) use ($storeId) {
+                $query->where('ip.store_id', $storeId);
+            });
+
+        // Ringkasan dihitung dari seluruh riwayat (bukan hanya halaman list).
+        $summary = (clone $base)
+            ->selectRaw(
+                'COUNT(DISTINCT di.invoice_purchase_id) as total_invoices, ' .
+                'SUM(di.quantity_product) as total_quantity, ' .
+                'SUM(di.subtotal_invoice) as total_value, ' .
+                'MIN(di.subtotal_invoice / di.quantity_product) as min_unit_price, ' .
+                'MAX(di.subtotal_invoice / di.quantity_product) as max_unit_price, ' .
+                'AVG(di.subtotal_invoice / di.quantity_product) as avg_unit_price, ' .
+                'MIN(ip.date) as first_date, MAX(ip.date) as last_date'
+            )
+            ->first();
+
+        $history = (clone $base)
+            ->orderByDesc('ip.date')
+            ->orderByDesc('ip.id')
+            ->limit(100)
+            ->get([
+                'di.invoice_purchase_id as invoice_id',
+                'ip.date',
+                'di.quantity_product as quantity',
+                DB::raw('di.subtotal_invoice / di.quantity_product as unit_price'),
+                'di.subtotal_invoice as subtotal',
+                's.name as supplier_name',
+                'st.id as store_id',
+                'st.nickname as store_name',
+                'ip.payment_status',
+                'ip.order_status',
+            ])
+            ->map(function ($row) {
+                return [
+                    'invoice_id' => $row->invoice_id,
+                    'date' => $row->date,
+                    'quantity' => (float) $row->quantity,
+                    'unit_price' => (int) round($row->unit_price),
+                    'subtotal' => (int) $row->subtotal,
+                    'supplier_name' => $row->supplier_name,
+                    'store_id' => $row->store_id,
+                    'store_name' => $row->store_name,
+                    'payment_status' => $row->payment_status,
+                    'order_status' => $row->order_status,
+                ];
+            });
+
+        return response()->json([
+            'success' => true,
+            'data' => [
+                'product' => [
+                    'id' => $product->id,
+                    'name' => $product->name,
+                    'unit' => $product->unit
+                        ? ['id' => $product->unit->id, 'unit' => $product->unit->unit]
+                        : null,
+                ],
+                'summary' => $summary && $summary->total_invoices ? [
+                    'total_invoices' => (int) $summary->total_invoices,
+                    'total_quantity' => (float) $summary->total_quantity,
+                    'total_value' => (int) $summary->total_value,
+                    'min_unit_price' => (int) round($summary->min_unit_price),
+                    'max_unit_price' => (int) round($summary->max_unit_price),
+                    'avg_unit_price' => (int) round($summary->avg_unit_price),
+                    'first_date' => $summary->first_date,
+                    'last_date' => $summary->last_date,
+                ] : null,
+                'history' => $history,
             ],
         ]);
     }

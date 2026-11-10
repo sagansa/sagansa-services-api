@@ -200,6 +200,8 @@ Route::middleware('auth:sanctum')->group(function () {
         // Info beli bahan baku (admin): tanggal beli terakhir per store,
         // harga satuan terakhir, dan yang sedang dalam invoice belum lunas.
         Route::get('/product-purchase-info', [\App\Http\Controllers\Api\ProcurementController::class, 'productPurchaseInfo']);
+        // Detail riwayat + statistik pembelian satu bahan baku (admin).
+        Route::get('/product-purchase-info/{id}', [\App\Http\Controllers\Api\ProcurementController::class, 'productPurchaseInfoDetail']);
         Route::get('/requests', [\App\Http\Controllers\Api\ProcurementController::class, 'index']);
         Route::post('/requests', [\App\Http\Controllers\Api\ProcurementController::class, 'store']);
         Route::get('/requests/{id}', [\App\Http\Controllers\Api\ProcurementController::class, 'show']);

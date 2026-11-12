@@ -156,6 +156,9 @@ class SalesOrderController extends Controller
      * Ganti seluruh item (detail_sales_orders) sebuah order. Khusus admin —
      * menggantikan alur lama "hubungi admin backend" dari mobile. Hanya
      * boleh saat order belum terkunci (delivery_status 2/3/6 = locked).
+     * Ongkos kirim (shipping_cost) opsional: ikut diubah bila dikirim,
+     * dipertahankan bila tidak. Invarian total: total_price =
+     * SUM(subtotal item) + shipping_cost.
      */
     public function updateItems(Request $request, $id)
     {
@@ -192,6 +195,9 @@ class SalesOrderController extends Controller
             'items.*.product_id' => 'required|exists:products,id',
             'items.*.quantity' => 'required|integer|min:1',
             'items.*.unit_price' => 'required|numeric|min:0',
+            // Ongkos kirim opsional: absen = pertahankan nilai lama (bukan 0)
+            // agar mobile lama yang belum mengirim field ini tidak menghapusnya.
+            'shipping_cost' => 'nullable|numeric|min:0',
         ]);
 
         if ($validator->fails()) {
@@ -203,9 +209,13 @@ class SalesOrderController extends Controller
         }
 
         DB::transaction(function () use ($request, $id) {
+            $shippingCost = $request->filled('shipping_cost')
+                ? (int) $request->input('shipping_cost')
+                : (int) DB::table('sales_orders')->where('id', $id)->value('shipping_cost');
+
             DB::table('detail_sales_orders')->where('sales_order_id', $id)->delete();
 
-            $totalPrice = 0;
+            $totalPrice = $shippingCost;
             $now = now();
             foreach ($request->items as $item) {
                 $quantity = (int) $item['quantity'];
@@ -228,6 +238,7 @@ class SalesOrderController extends Controller
                 ->where('id', $id)
                 ->update([
                     'total_price' => $totalPrice,
+                    'shipping_cost' => $shippingCost,
                     'updated_at' => $now,
                 ]);
         });
@@ -1041,6 +1052,7 @@ class SalesOrderController extends Controller
                 'sales_orders.image_delivery',
                 'sales_orders.image_payment',
                 'sales_orders.total_price',
+                'sales_orders.shipping_cost',
                 ...$this->paymentProofPrintColumns(),
                 'stores.nickname as store_name',
                 'online_shop_providers.name as provider_name',

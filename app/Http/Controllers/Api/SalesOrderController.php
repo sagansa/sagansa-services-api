@@ -1081,18 +1081,25 @@ class SalesOrderController extends Controller
      */
     private function enrichOrder(object $order): void
     {
+        // LEFT JOIN products + product_online_groups: baris detail boleh
+        // merujuk salah satu (checkout pelanggan menyimpan item paket dengan
+        // product_id NULL). INNER JOIN lama membuang baris grup sehingga
+        // "setiap order masuk tampil tanpa produk padahal totalnya ada".
         $items = DB::table('detail_sales_orders')
-            ->join('products', 'detail_sales_orders.product_id', '=', 'products.id')
-            ->leftJoin('units', 'products.unit_id', '=', 'units.id')
+            ->leftJoin('products', 'detail_sales_orders.product_id', '=', 'products.id')
+            ->leftJoin('product_online_groups', 'detail_sales_orders.product_online_group_id', '=', 'product_online_groups.id')
+            ->leftJoin('units as product_units', 'products.unit_id', '=', 'product_units.id')
+            ->leftJoin('units as group_units', 'product_online_groups.unit_id', '=', 'group_units.id')
             ->where('detail_sales_orders.sales_order_id', $order->id)
             ->select([
                 'detail_sales_orders.id as detail_id',
                 'detail_sales_orders.product_id',
-                'products.name as product_name',
+                'detail_sales_orders.product_online_group_id',
+                DB::raw('COALESCE(products.name, product_online_groups.name) as product_name'),
                 'detail_sales_orders.quantity',
                 'detail_sales_orders.unit_price',
                 'detail_sales_orders.subtotal_price',
-                'units.unit as product_unit'
+                DB::raw('COALESCE(product_units.unit, group_units.unit) as product_unit'),
             ])
             ->get();
 

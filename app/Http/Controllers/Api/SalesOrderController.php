@@ -192,7 +192,10 @@ class SalesOrderController extends Controller
 
         $validator = Validator::make($request->all(), [
             'items' => 'required|array|min:1',
-            'items.*.product_id' => 'required|exists:products,id',
+            // Baris detail boleh merujuk produk ATAU grup produk (checkout
+            // pelanggan menyimpan paket dengan product_id NULL).
+            'items.*.product_id' => 'required_without:items.*.product_online_group_id|nullable|exists:products,id',
+            'items.*.product_online_group_id' => 'required_without:items.*.product_id|nullable|exists:product_online_groups,id',
             'items.*.quantity' => 'required|integer|min:1',
             'items.*.unit_price' => 'required|numeric|min:0',
             // Ongkos kirim opsional: absen = pertahankan nilai lama (bukan 0)
@@ -225,7 +228,8 @@ class SalesOrderController extends Controller
 
                 DB::table('detail_sales_orders')->insert([
                     'sales_order_id' => $id,
-                    'product_id' => $item['product_id'],
+                    'product_id' => $item['product_id'] ?? null,
+                    'product_online_group_id' => $item['product_online_group_id'] ?? null,
                     'quantity' => $quantity,
                     'unit_price' => $unitPrice,
                     'subtotal_price' => $subtotal,

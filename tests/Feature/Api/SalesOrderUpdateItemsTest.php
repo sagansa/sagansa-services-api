@@ -29,6 +29,9 @@ class SalesOrderUpdateItemsTest extends TestCase
     /** @var array<int> id store buatan test, untuk cleanup. */
     private array $trackedStoreIds = [];
 
+    /** @var array<int> id grup buatan test, untuk cleanup. */
+    private array $trackedGroupIds = [];
+
     protected function tearDown(): void
     {
         if (! empty($this->trackedOrderIds)) {
@@ -40,6 +43,10 @@ class SalesOrderUpdateItemsTest extends TestCase
 
         if (! empty($this->trackedStoreIds)) {
             Store::whereIn('id', $this->trackedStoreIds)->delete();
+        }
+
+        if (! empty($this->trackedGroupIds)) {
+            DB::table('product_online_groups')->whereIn('id', $this->trackedGroupIds)->delete();
         }
 
         parent::tearDown();
@@ -56,6 +63,24 @@ class SalesOrderUpdateItemsTest extends TestCase
     private function productId(): int
     {
         return (int) DB::table('products')->value('id');
+    }
+
+    private function groupId(): int
+    {
+        $id = (int) DB::table('product_online_groups')->insertGetId([
+            'name' => 'Paket Group Update Test',
+            'slug' => 'paket-group-update-test-'.uniqid(),
+            'online_price' => 50000,
+            'online_category_id' => 1,
+            'unit_id' => 1,
+            'is_active' => 1,
+            'user_id' => 1,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        $this->trackedGroupIds[] = $id;
+
+        return $id;
     }
 
     /**
@@ -191,5 +216,51 @@ class SalesOrderUpdateItemsTest extends TestCase
         $row = collect($res->json('data'))->firstWhere('id', $orderId);
         $this->assertNotNull($row, 'Order direct buatan test harus ada di response search.');
         $this->assertSame(25000, (int) $row['shipping_cost']);
+    }
+
+    public function test_admin_update_items_campuran_produk_dan_grup(): void
+    {
+        Sanctum::actingAs($this->userWithRole('admin'));
+        $orderId = $this->makeDirectOrder(shippingCost: 15000);
+        $gid = $this->groupId();
+
+        $res = $this->postJson("/sales-orders/{$orderId}/items", [
+            'items' => [
+                ['product_id' => $this->productId(), 'quantity' => 1, 'unit_price' => 10000],
+                ['product_online_group_id' => $gid, 'quantity' => 2, 'unit_price' => 50000],
+            ],
+        ]);
+
+        $res->assertStatus(200)
+            ->assertJsonPath('success', true)
+            ->assertJsonPath('data.total_price', 125000); // 10k + 100k + ongkir 15k
+
+        $this->assertDatabaseHas('detail_sales_orders', [
+            'sales_order_id' => $orderId,
+            'product_online_group_id' => $gid,
+            'product_id' => null,
+            'quantity' => 2,
+            'subtotal_price' => 100000,
+        ]);
+
+        $names = array_map(
+            fn (array $item) => $item['product_name'] ?? '',
+            $res->json('data.items')
+        );
+        $this->assertContains('Paket Group Update Test', $names);
+    }
+
+    public function test_item_tanpa_produk_dan_grup_ditolak_422(): void
+    {
+        Sanctum::actingAs($this->userWithRole('admin'));
+        $orderId = $this->makeDirectOrder();
+
+        $res = $this->postJson("/sales-orders/{$orderId}/items", [
+            'items' => [
+                ['quantity' => 1, 'unit_price' => 5000],
+            ],
+        ]);
+
+        $res->assertStatus(422);
     }
 }

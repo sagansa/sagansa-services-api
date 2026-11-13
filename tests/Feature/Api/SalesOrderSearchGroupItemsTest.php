@@ -150,6 +150,11 @@ class SalesOrderSearchGroupItemsTest extends TestCase
         );
         $this->assertContains('Paket Group Test', $names, 'Item grup harus membawa nama grup-nya.');
 
+        $groupItem = collect($order['items'])->first(fn (array $item) => $item['product_id'] === null);
+        $this->assertNotNull($groupItem, 'Item grup (product_id NULL) harus ada di items.');
+        $this->assertSame($this->trackedGroupIds[0], (int) $groupItem['product_online_group_id'], 'Item grup harus membawa id grup-nya.');
+        $this->assertNotEmpty($groupItem['product_unit'], 'Item grup harus membawa unit grup-nya.');
+
         $this->assertSame('10000', (string) $order['shipping_cost'], 'Ongkos kirim harus ikut direspons.');
     }
 }
